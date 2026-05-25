@@ -38,10 +38,10 @@ class DoctorProfile(models.Model):
 
 class DoctorSlot(models.Model):
     doctor = models.ForeignKey(User, on_delete=models.CASCADE, related_name='slots')
-    date = models.DateField()              # التاريخ: YYYY-MM-DD
-    day = models.CharField(max_length=20)   # اسم اليوم: Monday, Tuesday...
-    time = models.CharField(max_length=50)  # الفاصل الزمني: "10:00 AM - 10:30 AM"
-    is_booked = models.BooleanField(default=False) # لمنع الحجز المزدوج (Double Booking)
+    date = models.DateField()              
+    day = models.CharField(max_length=20)   
+    time = models.CharField(max_length=50)  
+    is_booked = models.BooleanField(default=False) 
 
     def __str__(self):
         return f"Dr. {self.doctor.username} - {self.date} @ {self.time}"
@@ -68,9 +68,9 @@ class Appointment(models.Model):
     paid_at = models.DateTimeField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    diagnosis = models.TextField(blank=True, null=True)      # التشخيص
-    prescription = models.TextField(blank=True, null=True)   # الأدوية
-    doctor_notes = models.TextField(blank=True, null=True)   # ملاحظات الطبيب
+    diagnosis = models.TextField(blank=True, null=True)     
+    prescription = models.TextField(blank=True, null=True)  
+    doctor_notes = models.TextField(blank=True, null=True)   
 
     def __str__(self):
         return f"Appt #{self.id}: {self.patient.username} with Dr. {self.doctor.username}"
@@ -80,7 +80,6 @@ class PatientProfile(models.Model):
         ('Male', 'Male'),
         ('Female', 'Female'),
     ]
-    # مربوط بعلاقة OneToOne مع اليوزر الأساسي اللي نوعه مريض
     user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='patient_profile')
     date_of_birth = models.DateField(blank=True, null=True)
     gender = models.CharField(max_length=10, choices=GENDER_CHOICES, blank=True, null=True)
