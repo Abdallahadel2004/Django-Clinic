@@ -5,7 +5,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView as BaseTokenObtai
 from .views import (
     RegisterViewSet, DoctorListViewSet, DoctorSlotViewSet, 
     AppointmentViewSet, SpecialtyViewSet, DoctorProfileViewSet, 
-    UserViewSet, VerifyOTPView 
+    UserViewSet, VerifyOTPView ,PatientProfileViewSet
 )
 from .serializers import CustomTokenObtainPairSerializer
 
@@ -20,6 +20,7 @@ router.register(r'appointments', AppointmentViewSet, basename='appointments')
 router.register(r'specialties', SpecialtyViewSet, basename='specialties')
 router.register(r'users', UserViewSet, basename='user')
 router.register(r'doctor-profiles', DoctorProfileViewSet, basename='doctor-profile')
+router.register(r'patient-profiles', PatientProfileViewSet, basename='patient-profile')
 
 urlpatterns = [
     path('', include(router.urls)),
