@@ -2,7 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-
+from rest_framework.validators import UniqueValidator
 
 User = get_user_model()
 
@@ -12,6 +12,14 @@ class SpecialtySerializer(serializers.ModelSerializer):
         fields = '__all__'
 
 class UserRegisterSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(
+        validators=[UniqueValidator(queryset=User.objects.all(), message="This username is already taken.")]
+    )
+    email = serializers.EmailField(
+        required=True,
+        validators=[UniqueValidator(queryset=User.objects.all(), message="A user with this email already exists.")]
+    )
+    
     password = serializers.CharField(write_only=True, style={'input_type': 'password'})
 
     class Meta:
@@ -21,7 +29,7 @@ class UserRegisterSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         user = User.objects.create_user(
             username=validated_data['username'],
-            email=validated_data.get('email', ''),
+            email=validated_data['email'],
             password=validated_data['password'],
             role=validated_data.get('role', 'patient'),
             phone=validated_data.get('phone', ''),
@@ -97,3 +105,4 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         data['username'] = self.user.username
         data['uid'] = self.user.id
         return data
+

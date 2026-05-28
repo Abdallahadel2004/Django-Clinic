@@ -88,3 +88,30 @@ class PatientProfile(models.Model):
 
     def __str__(self):
         return f"Profile: {self.user.get_full_name() or self.user.username}"
+    
+
+
+
+import random
+from django.db import models
+from django.contrib.auth import get_user_model
+from django.utils import timezone
+from datetime import timedelta
+
+User = get_user_model()
+
+class UserOTP(models.Model):
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='otp')
+    code = models.CharField(max_length=6)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def generate_code(self):
+        self.code = str(random.randint(100000, 999999))
+        self.created_at = timezone.now()
+        self.save()
+
+    def is_valid(self):
+        return timezone.now() < self.created_at + timedelta(minutes=10)
+
+    def __str__(self):
+        return f"{self.user.username} - {self.code}"
