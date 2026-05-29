@@ -184,41 +184,46 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         except User.DoesNotExist:
             return Response({"error": "The specified doctor does not exist in the system."}, status=status.HTTP_400_BAD_REQUEST)
 
+    # ─── في AppointmentViewSet، استبدل الـ cancel_appointment action بالكود ده ───
+
     @action(detail=True, methods=['post'], url_path='cancel')
     def cancel_appointment(self, request, pk=None):
         appointment = self.get_object()
         cancel_reason = request.data.get('reason', 'No specific reason provided.')
 
-        # Security check: Only the assigned doctor or an admin can cancel the appointment
-        if request.user.role != 'admin' and appointment.doctor != request.user:
+        # Security: doctor أو patient أو admin فقط
+        if request.user.role != 'admin' \
+                and appointment.doctor != request.user \
+                and appointment.patient != request.user:
             return Response(
-                {"error": "You do not have permission to cancel this appointment."}, 
+                {"error": "You do not have permission to cancel this appointment."},
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # Logical check: Ensure the appointment isn't already cancelled
         if appointment.status == 'Cancelled':
             return Response(
-                {"error": "This appointment is already cancelled."}, 
+                {"error": "This appointment is already cancelled."},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        cancelled_by = 'patient' if request.user == appointment.patient else 'doctor'
+
         try:
             with transaction.atomic():
-                # 1. Update appointment status and process the logic refund
                 appointment.status = 'Cancelled'
                 if appointment.payment_status == 'Paid':
                     appointment.payment_status = 'Refunded'
                 appointment.save()
 
-                # 2. Free up the doctor slot for other patients
                 if appointment.slot:
                     slot = appointment.slot
                     slot.is_booked = False
                     slot.save()
 
-            # 3. Trigger email notification (placed outside the database transaction block)
             self._send_cancellation_email(appointment, cancel_reason)
+
+            if cancelled_by == 'patient':
+                self._send_doctor_cancellation_email(appointment, cancel_reason)
 
             return Response({
                 "message": "Appointment cancelled successfully. Slot freed, patient notified, and refund processed.",
@@ -228,9 +233,64 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 
         except Exception as e:
             return Response(
-                {"error": f"An error occurred during cancellation: {str(e)}"}, 
+                {"error": f"An error occurred during cancellation: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+    def _send_cancellation_email(self, appointment, reason):
+        try:
+            patient_email = appointment.patient.email
+            doctor_name = appointment.doctor.get_full_name() or appointment.doctor.username
+            slot_time = appointment.slot.time if appointment.slot else "N/A"
+            slot_date = appointment.slot.date if appointment.slot else "N/A"
+
+            subject = 'CarePulse - Your Appointment Has Been Cancelled'
+            message = (
+                f"Hello {appointment.patient.first_name or appointment.patient.username},\n\n"
+                f"We regret to inform you that your appointment with Dr. {doctor_name} "
+                f"scheduled on {slot_date} at {slot_time} has been cancelled.\n\n"
+                f"Reason: \"{reason}\"\n\n"
+                f"A full refund of {appointment.consultation_fee} EGP has been issued back to your account.\n\n"
+                f"Wishing you the best of health,\nCarePulse Team"
+            )
+
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email='no-reply@carepulse.com',
+                recipient_list=[patient_email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            print(f"Failed to send patient cancellation email: {e}")
+
+    def _send_doctor_cancellation_email(self, appointment, reason):
+        try:
+            doctor_email = appointment.doctor.email
+            patient_name = appointment.patient.get_full_name() or appointment.patient.username
+            slot_time = appointment.slot.time if appointment.slot else "N/A"
+            slot_date = appointment.slot.date if appointment.slot else "N/A"
+
+            subject = 'CarePulse - Appointment Cancelled by Patient'
+            message = (
+                f"Dear Dr. {appointment.doctor.get_full_name() or appointment.doctor.username},\n\n"
+                f"We would like to inform you that {patient_name} has cancelled their appointment "
+                f"scheduled on {slot_date} at {slot_time}.\n\n"
+                f"Cancellation reason: \"{reason}\"\n\n"
+                f"The slot has been freed and is now available for new bookings.\n\n"
+                f"Best regards,\nCarePulse Team"
+            )
+
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email='no-reply@carepulse.com',
+                recipient_list=[doctor_email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            print(f"Failed to send doctor cancellation email: {e}")
+
 
     @action(detail=True, methods=['post'], url_path='complete')
     def complete_appointment(self, request, pk=None):
