@@ -68,12 +68,52 @@ class DoctorDetailSerializer(serializers.ModelSerializer):
 
 class DoctorSlotSerializer(serializers.ModelSerializer):
     doctor_name = serializers.ReadOnlyField(source='doctor.get_full_name')
+    doctor = serializers.PrimaryKeyRelatedField(read_only=True)
 
     class Meta:
         model = DoctorSlot
         fields = ['id', 'doctor', 'doctor_name', 'date', 'day', 'time', 'is_booked']
 
+    def validate(self, data):
+        # Access the user from the context
+        user = self.context['request'].user
+        
+        # Ensure the user is a doctor or has access to their doctor profile
+        # Adjust 'doctor_profile' based on your actual model structure
+        doctor = user
+                
+        date = data.get('date')
+        time_str = data.get('time')
 
+        if not time_str or ' - ' not in time_str:
+            raise serializers.ValidationError("Invalid time format. Use 'HH:MM - HH:MM'.")
+
+        def to_minutes(t_str):
+            h, m = map(int, t_str.split(':'))
+            return h * 60 + m
+
+        try:
+            start_str, end_str = time_str.split(' - ')
+            new_start = to_minutes(start_str)
+            new_end = to_minutes(end_str)
+        except ValueError:
+            raise serializers.ValidationError("Invalid time values.")
+
+        # Check for overlaps
+        existing_slots = DoctorSlot.objects.filter(doctor=doctor, date=date)
+        if self.instance:
+            existing_slots = existing_slots.exclude(pk=self.instance.pk)
+
+        for slot in existing_slots:
+            ex_start_str, ex_end_str = slot.time.split(' - ')
+            ex_start = to_minutes(ex_start_str)
+            ex_end = to_minutes(ex_end_str)
+
+            # Check overlap: (StartA < EndB) and (EndA > StartB)
+            if new_start < ex_end and new_end > ex_start:
+                raise serializers.ValidationError(f"This time slot overlaps with an existing slot: {slot.time}")
+        
+        return data
 class AppointmentSerializer(serializers.ModelSerializer):
     patient_name = serializers.ReadOnlyField(source='patient.get_full_name')
     doctor_name = serializers.ReadOnlyField(source='doctor.get_full_name')

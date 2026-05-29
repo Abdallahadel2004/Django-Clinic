@@ -57,8 +57,8 @@ class Appointment(models.Model):
     
     patient = models.ForeignKey(User, on_delete=models.CASCADE, related_name='patient_appointments')
     doctor = models.ForeignKey(User, on_delete=models.CASCADE, related_name='doctor_appointments')
-    slot = models.OneToOneField(DoctorSlot, on_delete=models.CASCADE, related_name='appointment')
-    
+    slot = models.ForeignKey('DoctorSlot', on_delete=models.SET_NULL, null=True, blank=True)
+
     status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='Pending')
     consultation_fee = models.DecimalField(max_digits=10, decimal_places=2)
     

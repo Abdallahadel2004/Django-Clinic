@@ -21,20 +21,31 @@ class RegisterViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.AllowAny]
 
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
-        
         email = request.data.get('email')
-        if email and User.objects.filter(email=email).exists():
-            return Response({
-                "message": "User registered successfully. Please verify your account using the OTP code sent to your email.",
-                "email": email
-            }, status=status.HTTP_201_CREATED)
-            
+        
+        existing_user = User.objects.filter(email=email).first()
+        if existing_user:
+            if not existing_user.is_active:
+                otp_obj, created = UserOTP.objects.get_or_create(user=existing_user)
+                otp_obj.generate_code()
+                self._send_verification_email(existing_user, otp_obj.code)
+                
+                return Response({
+                    "message": "This account is already registered but not verified. The verification code (OTP) has been resent to your email.",
+                    "email": existing_user.email
+                }, status=status.HTTP_200_OK)
+            else:
+                # لو متفعل وجاهز، نرجعه للـ Login
+                return Response({
+                    "error": "This email is already registered and verified. You can log in directly."
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
+        serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
         with transaction.atomic():
             user = serializer.save()
-            user.is_active = False
+            user.is_active = False  
             user.save()
             
             if user.role == 'doctor':
@@ -45,21 +56,24 @@ class RegisterViewSet(viewsets.ModelViewSet):
             otp_obj, created = UserOTP.objects.get_or_create(user=user)
             otp_obj.generate_code()
 
+        self._send_verification_email(user, otp_obj.code)
+            
+        return Response({
+            "message": "User registered successfully. Please verify your account using the OTP code sent to your email.",
+            "email": user.email
+        }, status=status.HTTP_201_CREATED)
+
+    def _send_verification_email(self, user, code):
         try:
             send_mail(
                 subject='CarePulse - Verify Your Account',
-                message=f'Welcome to CarePulse! Your verification code is: {otp_obj.code}. It is valid for 10 minutes.',
+                message=f'Welcome to CarePulse! Your verification code is: {code}. It is valid for 10 minutes.',
                 from_email='no-reply@carepulse.com',
                 recipient_list=[user.email],
                 fail_silently=False,
             )
         except Exception as e:
             print(f"Email failed to send: {e}")
-            
-        return Response({
-            "message": "User registered successfully. Please verify your account using the OTP code sent to your email.",
-            "email": user.email
-        }, status=status.HTTP_201_CREATED)
 
 
 class VerifyOTPView(APIView):
@@ -71,7 +85,6 @@ class VerifyOTPView(APIView):
 
         if not email or not otp_code:
             return Response({"error": "Email and OTP code are required."}, status=status.HTTP_400_BAD_REQUEST)
-        generic_error = Response({"error": "Invalid email or OTP code."}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             user = User.objects.get(email=email)
@@ -90,8 +103,7 @@ class VerifyOTPView(APIView):
             return Response({"message": "Account verified successfully! You can now log in."}, status=status.HTTP_200_OK)
 
         except (User.DoesNotExist, UserOTP.DoesNotExist):
-            return generic_error
-
+            return Response({"error": "Invalid email or OTP code."}, status=status.HTTP_400_BAD_REQUEST)
 
 
 class DoctorListViewSet(viewsets.ReadOnlyModelViewSet):
@@ -105,10 +117,19 @@ class DoctorSlotViewSet(viewsets.ModelViewSet):
     serializer_class = DoctorSlotSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def perform_create(self, serializer):
+        serializer.save(doctor=self.request.user)
+
     @action(detail=False, methods=['get'], url_path='available')
     def available_slots(self, request):
         today = timezone.now().date()
+        
         slots = DoctorSlot.objects.filter(is_booked=False, date__gte=today)
+        
+        doctor_id = request.query_params.get('doctor_id')
+        if doctor_id:
+            slots = slots.filter(doctor_id=doctor_id)
+            
         serializer = self.get_serializer(slots, many=True)
         return Response(serializer.data)
 
@@ -135,7 +156,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
 
         try:
             with transaction.atomic():
-                slot = DoctorSlot.objects.select_for_update().get(id=slot_id, is_booked=False)
+                slot = DoctorSlot.objects.select_for_update().get(id=slot_id, doctor_id=doctor_id, is_booked=False)
                 doctor = User.objects.get(id=doctor_id)
 
                 appointment = Appointment.objects.create(
@@ -156,8 +177,125 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 return Response({"message": "Appointment booked successfully!", "appointment_id": appointment.id}, status=status.HTTP_201_CREATED)
 
         except DoctorSlot.DoesNotExist:
-            return Response({"error": "This slot is already booked or does not exist."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"error": "This appointment slot is unavailable, already booked, or does not belong to this doctor."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except User.DoesNotExist:
+            return Response({"error": "The specified doctor does not exist in the system."}, status=status.HTTP_400_BAD_REQUEST)
 
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel_appointment(self, request, pk=None):
+        appointment = self.get_object()
+        cancel_reason = request.data.get('reason', 'No specific reason provided.')
+
+        # Security check: Only the assigned doctor or an admin can cancel the appointment
+        if request.user.role != 'admin' and appointment.doctor != request.user:
+            return Response(
+                {"error": "You do not have permission to cancel this appointment."}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # Logical check: Ensure the appointment isn't already cancelled
+        if appointment.status == 'Cancelled':
+            return Response(
+                {"error": "This appointment is already cancelled."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            with transaction.atomic():
+                # 1. Update appointment status and process the logic refund
+                appointment.status = 'Cancelled'
+                if appointment.payment_status == 'Paid':
+                    appointment.payment_status = 'Refunded'
+                appointment.save()
+
+                # 2. Free up the doctor slot for other patients
+                if appointment.slot:
+                    slot = appointment.slot
+                    slot.is_booked = False
+                    slot.save()
+
+            # 3. Trigger email notification (placed outside the database transaction block)
+            self._send_cancellation_email(appointment, cancel_reason)
+
+            return Response({
+                "message": "Appointment cancelled successfully. Slot freed, patient notified, and refund processed.",
+                "appointment_status": appointment.status,
+                "payment_status": appointment.payment_status
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            return Response(
+                {"error": f"An error occurred during cancellation: {str(e)}"}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+    @action(detail=True, methods=['post'], url_path='complete')
+    def complete_appointment(self, request, pk=None):
+        appointment = self.get_object()
+        
+        appointment.status = 'Completed'
+        appointment.diagnosis = request.data.get('diagnosis')
+        appointment.prescription = request.data.get('prescription')
+        appointment.doctor_notes = request.data.get('doctor_notes')
+        appointment.save()
+
+        return Response({"message": "Appointment completed successfully."}, status=status.HTTP_200_OK)
+
+
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve_appointment(self, request, pk=None):
+        appointment = self.get_object()
+
+        # حماية: التأكد إن الدكتور المسؤول أو الأدمن هو اللي بيوافق
+        if request.user.role != 'admin' and appointment.doctor != request.user:
+            return Response(
+                {"error": "You do not have permission to approve this appointment."}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
+
+        # منطق: التأكد إن الموعد مش متوافق عليه أصلاً
+        if appointment.status == 'Confirmed':
+            return Response(
+                {"error": "This appointment is already confirmed."}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # التعديل والحفظ المباشر في الداتابيز 🚀
+        appointment.status = 'Confirmed'
+        appointment.save()
+
+        return Response({
+            "message": "Appointment approved successfully.",
+            "appointment_status": appointment.status
+        }, status=status.HTTP_200_OK)
+    def _send_cancellation_email(self, appointment, reason):
+        try:
+            patient_email = appointment.patient.email
+            doctor_name = appointment.doctor.get_full_name() or appointment.doctor.username
+            slot_time = appointment.slot.time if appointment.slot else "N/A"
+            slot_date = appointment.slot.date if appointment.slot else "N/A"
+
+            subject = 'CarePulse - Your Appointment Has Been Cancelled'
+            message = (
+                f"Hello {appointment.patient.first_name or appointment.patient.username},\n\n"
+                f"We regret to inform you that Dr. {doctor_name} has cancelled your appointment scheduled on {slot_date} at {slot_time}.\n\n"
+                f"Cancellation Reason provided by the doctor:\n\"{reason}\"\n\n"
+                f"Since you have already prepaid, a full refund of {appointment.consultation_fee} EGP has been issued back to your account.\n\n"
+                f"Wishing you the best of health,\nCarePulse Team"
+            )
+
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email='no-reply@carepulse.com',
+                recipient_list=[patient_email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            print(f"Failed to send cancellation email: {e}")
 
 class SpecialtyViewSet(viewsets.ModelViewSet):
     queryset = Specialty.objects.all()
@@ -167,7 +305,7 @@ class SpecialtyViewSet(viewsets.ModelViewSet):
         if self.action in ['create', 'update', 'partial_update', 'destroy']:
             return [permissions.IsAdminUser()] 
         return [permissions.IsAuthenticated()] 
-    
+
 
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
@@ -177,17 +315,15 @@ class UserViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get', 'put', 'patch'], url_path='me')
     def get_current_user(self, request):
         user = request.user
-        
         if request.method == 'GET':
             serializer = self.get_serializer(user)
             return Response(serializer.data)
-            
         elif request.method in ['PUT', 'PATCH']:
             serializer = self.get_serializer(user, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)
             serializer.save()
             return Response(serializer.data)
-        
+
 
 class DoctorProfileViewSet(viewsets.ModelViewSet):
     queryset = DoctorProfile.objects.all()
@@ -196,17 +332,21 @@ class DoctorProfileViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get', 'put', 'patch'], url_path='me')
     def my_profile(self, request):
+        if request.user.role != 'doctor':
+                return Response(
+                    {"error": "Sorry, this profile is intended for doctors only."},
+                    status=status.HTTP_403_FORBIDDEN)            
         profile, created = DoctorProfile.objects.get_or_create(user=request.user)
         
         if request.method == 'GET':
             serializer = self.get_serializer(profile)
             return Response(serializer.data)
-            
         elif request.method in ['PUT', 'PATCH']:
             serializer = self.get_serializer(profile, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)
             serializer.save()
             return Response(serializer.data)
+
 
 class PatientProfileViewSet(viewsets.ModelViewSet):
     queryset = PatientProfile.objects.all()
@@ -215,16 +355,17 @@ class PatientProfileViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get', 'put', 'patch'], url_path='me')
     def my_profile(self, request):
+        if request.user.role != 'patient':
+            return Response(
+                    {"error": "Sorry, this profile is intended for patients only."},
+                      status=status.HTTP_403_FORBIDDEN)            
         profile, created = PatientProfile.objects.get_or_create(user=request.user)
         
         if request.method == 'GET':
             serializer = self.get_serializer(profile)
             return Response(serializer.data)
-            
         elif request.method in ['PUT', 'PATCH']:
             serializer = self.get_serializer(profile, data=request.data, partial=True)
             serializer.is_valid(raise_exception=True)
             serializer.save()
             return Response(serializer.data)
-
-
