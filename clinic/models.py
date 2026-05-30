@@ -30,10 +30,34 @@ class DoctorProfile(models.Model):
     bio = models.TextField(blank=True, null=True)
     consultation_fee = models.DecimalField(max_digits=10, decimal_places=2, default=250.00)
     clinic_address = models.TextField(blank=True, null=True)
-    is_approved = models.BooleanField(default=False) 
+    clinic_phone = models.CharField(max_length=20, blank=True, null=True)
+    is_approved = models.BooleanField(default=False)
 
     def __str__(self):
         return f"Dr. {self.user.get_full_name() or self.user.username}"
+
+
+class DoctorAvailability(models.Model):
+    DAY_CHOICES = [
+        ('Monday', 'Monday'),
+        ('Tuesday', 'Tuesday'),
+        ('Wednesday', 'Wednesday'),
+        ('Thursday', 'Thursday'),
+        ('Friday', 'Friday'),
+        ('Saturday', 'Saturday'),
+        ('Sunday', 'Sunday'),
+    ]
+    doctor = models.ForeignKey(User, on_delete=models.CASCADE, related_name='availabilities')
+    day = models.CharField(max_length=9, choices=DAY_CHOICES)
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = ('doctor', 'day', 'start_time', 'end_time')
+
+    def __str__(self):
+        return f"{self.doctor.username} available on {self.day} from {self.start_time} to {self.end_time}"
 
 
 class DoctorSlot(models.Model):
