@@ -7,11 +7,11 @@ from django.utils import timezone
 from django.db import transaction
 from django.core.mail import send_mail
 
-from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, UserOTP
+from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, UserOTP, DoctorAvailability
 from .serializers import (
     UserSerializer, UserRegisterSerializer, SpecialtySerializer,
     DoctorProfileSerializer, PatientProfileSerializer, DoctorDetailSerializer,
-    DoctorSlotSerializer, AppointmentSerializer
+    DoctorSlotSerializer, AppointmentSerializer, DoctorAvailabilitySerializer
 )
 from .permissions import IsAdminOrReadOnly
 
@@ -126,6 +126,34 @@ class DoctorSlotViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
+class DoctorAvailabilityViewSet(viewsets.ModelViewSet):
+    queryset = DoctorAvailability.objects.all()
+    serializer_class = DoctorAvailabilitySerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_staff or user.role == 'admin':
+            queryset = DoctorAvailability.objects.all()
+        elif user.role == 'doctor':
+            queryset = DoctorAvailability.objects.filter(doctor=user)
+        else:
+            queryset = DoctorAvailability.objects.none()
+
+        doctor_id = self.request.query_params.get('doctor_id')
+        if doctor_id:
+            queryset = queryset.filter(doctor_id=doctor_id)
+        return queryset
+
+    def perform_create(self, serializer):
+        if self.request.user.role != 'doctor' and not self.request.user.is_staff:
+            raise permissions.PermissionDenied('Only doctors or admins can create availability schedules.')
+        if self.request.user.role == 'doctor':
+            serializer.save(doctor=self.request.user)
+        else:
+            serializer.save()
+
+
 class AppointmentViewSet(viewsets.ModelViewSet):
     queryset = Appointment.objects.all()
     serializer_class = AppointmentSerializer
@@ -138,6 +166,22 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if user.role == 'doctor':
             return Appointment.objects.filter(doctor=user)
         return Appointment.objects.filter(patient=user)
+
+    @action(detail=False, methods=['get'], url_path='upcoming')
+    def upcoming(self, request):
+        queryset = self.get_queryset()
+        today = timezone.now().date()
+        upcoming_qs = queryset.filter(slot__date__gte=today).exclude(status__in=['Cancelled', 'Completed', 'Rejected'])
+        serializer = self.get_serializer(upcoming_qs, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='past')
+    def past(self, request):
+        queryset = self.get_queryset()
+        today = timezone.now().date()
+        past_qs = queryset.filter(slot__date__lt=today) | queryset.filter(status__in=['Completed', 'Cancelled', 'Rejected'])
+        serializer = self.get_serializer(past_qs.distinct(), many=True)
+        return Response(serializer.data)
 
     @action(detail=False, methods=['post'], url_path='book')
     def book_appointment(self, request):
@@ -252,8 +296,24 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if appointment.status == 'Confirmed':
             return Response({'error': 'This appointment is already confirmed.'}, status=status.HTTP_400_BAD_REQUEST)
         appointment.status = 'Confirmed'
+        appointment.doctor_notes = request.data.get('doctor_notes', appointment.doctor_notes)
         appointment.save()
         return Response({'message': 'Appointment approved successfully.', 'appointment_status': appointment.status}, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject_appointment(self, request, pk=None):
+        appointment = self.get_object()
+        if request.user.role != 'admin' and appointment.doctor != request.user:
+            return Response({'error': 'You do not have permission to reject this appointment.'}, status=status.HTTP_403_FORBIDDEN)
+        if appointment.status in ['Rejected', 'Cancelled']:
+            return Response({'error': 'This appointment is already closed.'}, status=status.HTTP_400_BAD_REQUEST)
+        appointment.status = 'Rejected'
+        appointment.doctor_notes = request.data.get('doctor_notes', appointment.doctor_notes)
+        if appointment.slot:
+            appointment.slot.is_booked = False
+            appointment.slot.save()
+        appointment.save()
+        return Response({'message': 'Appointment rejected successfully.', 'appointment_status': appointment.status}, status=status.HTTP_200_OK)
 
 
 class SpecialtyViewSet(viewsets.ModelViewSet):

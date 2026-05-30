@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment
+from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, DoctorAvailability
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.validators import UniqueValidator
 
@@ -60,8 +60,30 @@ class DoctorProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DoctorProfile
-        fields = ['id', 'specialty', 'specialty_name', 'bio', 'consultation_fee', 'clinic_address', 'is_approved']
+        fields = ['id', 'specialty', 'specialty_name', 'bio', 'consultation_fee', 'clinic_address', 'clinic_phone', 'is_approved']
         read_only_fields = ['is_approved']
+
+
+class DoctorAvailabilitySerializer(serializers.ModelSerializer):
+    doctor_name = serializers.ReadOnlyField(source='doctor.get_full_name')
+    doctor = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(role='doctor'),
+        required=False
+    )
+
+    class Meta:
+        model = DoctorAvailability
+        fields = ['id', 'doctor', 'doctor_name', 'day', 'start_time', 'end_time', 'is_active']
+
+    def validate(self, data):
+        if data['end_time'] <= data['start_time']:
+            raise serializers.ValidationError('end_time must be greater than start_time.')
+        return data
+
+    def create(self, validated_data):
+        if 'doctor' not in validated_data:
+            validated_data['doctor'] = self.context['request'].user
+        return super().create(validated_data)
 
 
 class PatientProfileSerializer(serializers.ModelSerializer):
@@ -126,6 +148,15 @@ class DoctorSlotSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError(f"This time slot overlaps with an existing slot: {slot.time}")
 
         return data
+
+
+class DoctorAvailabilitySerializer(serializers.ModelSerializer):
+    doctor_name = serializers.ReadOnlyField(source='doctor.get_full_name')
+
+    class Meta:
+        model = DoctorAvailability
+        fields = ['id', 'doctor', 'doctor_name', 'day', 'start_time', 'end_time', 'is_active']
+        read_only_fields = ['doctor', 'doctor_name']
 
 
 class AppointmentSerializer(serializers.ModelSerializer):
