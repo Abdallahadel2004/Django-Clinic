@@ -6,6 +6,21 @@ from rest_framework.validators import UniqueValidator
 
 User = get_user_model()
 
+class UserSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    role_display = serializers.CharField(source='get_role_display', read_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'username', 'email', 'first_name', 'last_name',
+            'full_name', 'phone', 'role', 'role_display', 'is_active', 'is_staff'
+        ]
+        read_only_fields = ['id', 'full_name', 'role_display']
+
+    def get_full_name(self, obj):
+        return obj.get_full_name() or obj.username
+
 class SpecialtySerializer(serializers.ModelSerializer):
     class Meta:
         model = Specialty
@@ -57,10 +72,14 @@ class PatientProfileSerializer(serializers.ModelSerializer):
 class DoctorDetailSerializer(serializers.ModelSerializer):
     profile = DoctorProfileSerializer(source='doctor_profile', read_only=True)
     full_name = serializers.SerializerMethodField()
+    role_display = serializers.CharField(source='get_role_display', read_only=True)
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'full_name', 'phone', 'profile']
+        fields = [
+            'id', 'username', 'email', 'first_name', 'last_name',
+            'full_name', 'phone', 'role', 'role_display', 'is_active', 'profile'
+        ]
 
     def get_full_name(self, obj):
         return obj.get_full_name() or obj.username

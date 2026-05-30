@@ -9,7 +9,7 @@ from django.core.mail import send_mail
 
 from .models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, UserOTP
 from .serializers import (
-    UserRegisterSerializer, SpecialtySerializer, DoctorProfileSerializer,
+    UserSerializer, UserRegisterSerializer, SpecialtySerializer, DoctorProfileSerializer,
     PatientProfileSerializer, DoctorDetailSerializer, DoctorSlotSerializer, AppointmentSerializer
 )
 
@@ -369,20 +369,60 @@ class SpecialtyViewSet(viewsets.ModelViewSet):
 
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
-    serializer_class = UserRegisterSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    @action(detail=False, methods=['get', 'put', 'patch'], url_path='me')
+    def get_serializer_class(self):
+        if self.action == 'create':
+            return UserRegisterSerializer
+        return UserSerializer
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve', 'update', 'partial_update', 'destroy', 'approve', 'block']:
+            return [permissions.IsAdminUser()]
+        return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        user = self.request.user
+        queryset = User.objects.all()
+        if not user.is_staff and user.role != 'admin':
+            return User.objects.filter(id=user.id)
+
+        role = self.request.query_params.get('role')
+        if role in ['doctor', 'patient', 'admin']:
+            queryset = queryset.filter(role=role)
+        return queryset
+
+    @action(detail=False, methods=['get'], url_path='me')
     def get_current_user(self, request):
         user = request.user
-        if request.method == 'GET':
-            serializer = self.get_serializer(user)
-            return Response(serializer.data)
-        elif request.method in ['PUT', 'PATCH']:
-            serializer = self.get_serializer(user, data=request.data, partial=True)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
-            return Response(serializer.data)
+        serializer = self.get_serializer(user)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='approve', permission_classes=[permissions.IsAdminUser])
+    def approve(self, request, pk=None):
+        user = self.get_object()
+        user.is_active = True
+        user.save()
+
+        if user.role == 'doctor':
+            profile, created = DoctorProfile.objects.get_or_create(user=user)
+            profile.is_approved = True
+            profile.save()
+
+        return Response({
+            'message': 'User approved successfully.',
+            'is_active': user.is_active,
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='block', permission_classes=[permissions.IsAdminUser])
+    def block(self, request, pk=None):
+        user = self.get_object()
+        user.is_active = False
+        user.save()
+        return Response({
+            'message': 'User blocked successfully.',
+            'is_active': user.is_active,
+        }, status=status.HTTP_200_OK)
 
 
 class DoctorProfileViewSet(viewsets.ModelViewSet):
@@ -390,12 +430,20 @@ class DoctorProfileViewSet(viewsets.ModelViewSet):
     serializer_class = DoctorProfileSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == 'admin' or user.is_staff:
+            return DoctorProfile.objects.all()
+        if user.role == 'doctor':
+            return DoctorProfile.objects.filter(user=user)
+        return DoctorProfile.objects.none()
+
     @action(detail=False, methods=['get', 'put', 'patch'], url_path='me')
     def my_profile(self, request):
         if request.user.role != 'doctor':
-                return Response(
-                    {"error": "Sorry, this profile is intended for doctors only."},
-                    status=status.HTTP_403_FORBIDDEN)            
+            return Response(
+                {"error": "Sorry, this profile is intended for doctors only."},
+                status=status.HTTP_403_FORBIDDEN)
         profile, created = DoctorProfile.objects.get_or_create(user=request.user)
         
         if request.method == 'GET':
@@ -406,6 +454,19 @@ class DoctorProfileViewSet(viewsets.ModelViewSet):
             serializer.is_valid(raise_exception=True)
             serializer.save()
             return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='approve', permission_classes=[permissions.IsAdminUser])
+    def approve_profile(self, request, pk=None):
+        profile = self.get_object()
+        profile.is_approved = True
+        profile.save()
+        profile.user.is_active = True
+        profile.user.save()
+        return Response({
+            'message': 'Doctor profile approved successfully.',
+            'doctor_id': profile.user.id,
+            'is_approved': profile.is_approved,
+        }, status=status.HTTP_200_OK)
 
 
 class PatientProfileViewSet(viewsets.ModelViewSet):
