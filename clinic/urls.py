@@ -5,7 +5,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView as BaseTokenObtai
 from clinic.api.viewsets import (
     RegisterViewSet, DoctorListViewSet, DoctorSlotViewSet,
     AppointmentViewSet, SpecialtyViewSet,
-    DoctorProfileViewSet, UserViewSet, VerifyOTPView, PatientProfileViewSet
+    DoctorProfileViewSet, UserViewSet, VerifyOTPView, PatientProfileViewSet,DoctorAvailabilityViewSet
 )
 from .serializers import CustomTokenObtainPairSerializer
 
@@ -16,7 +16,7 @@ router = DefaultRouter()
 router.register(r'register', RegisterViewSet, basename='register')
 router.register(r'doctors', DoctorListViewSet, basename='doctors')
 router.register(r'slots', DoctorSlotViewSet, basename='slots')
-# router.register(r'availabilities', DoctorAvailabilityViewSet, basename='availabilities')
+router.register(r'availabilities', DoctorAvailabilityViewSet, basename='availabilities')
 router.register(r'appointments', AppointmentViewSet, basename='appointments')
 router.register(r'specialties', SpecialtyViewSet, basename='specialties')
 router.register(r'users', UserViewSet, basename='user')
