@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, DoctorAvailability
+from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, DoctorAvailability, Payment
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.validators import UniqueValidator
 
@@ -168,10 +168,22 @@ class DoctorSlotSerializer(serializers.ModelSerializer):
         return data
 
 
+class PaymentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Payment
+        fields = [
+            'id', 'appointment', 'total_amount', 'commission_percentage',
+            'commission_fee', 'doctor_payout', 'payment_method',
+            'card_last4', 'status', 'paid_at', 'updated_at'
+        ]
+        read_only_fields = fields  # Payments are system-created, never user-edited
+
+
 class AppointmentSerializer(serializers.ModelSerializer):
     patient_name = serializers.ReadOnlyField(source='patient.get_full_name')
     doctor_name = serializers.ReadOnlyField(source='doctor.get_full_name')
     slot_details = DoctorSlotSerializer(source='slot', read_only=True)
+    payment_record = PaymentSerializer(read_only=True)    # NEW
 
     class Meta:
         model = Appointment
@@ -179,9 +191,16 @@ class AppointmentSerializer(serializers.ModelSerializer):
             'id', 'patient', 'patient_name', 'doctor', 'doctor_name', 'slot', 'slot_details',
             'status', 'consultation_fee', 'payment_status', 'payment_method',
             'payment_card_last4', 'paid_at', 'created_at',
-            'diagnosis', 'prescription', 'doctor_notes'
+            'diagnosis', 'prescription', 'doctor_notes',
+            # NEW financial fields
+            'platform_commission_percentage', 'platform_commission_fee', 'doctor_payout',
+            # NEW nested records
+            'payment_record'
         ]
-        read_only_fields = ['patient', 'status', 'payment_status', 'paid_at']
+        read_only_fields = [
+            'patient', 'status', 'payment_status', 'paid_at',
+            'platform_commission_percentage', 'platform_commission_fee', 'doctor_payout'
+        ]
 
 
 # ✅ Fixed: uses email field for login
