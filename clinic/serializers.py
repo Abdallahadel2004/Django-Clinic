@@ -75,11 +75,7 @@ class DoctorSlotSerializer(serializers.ModelSerializer):
         fields = ['id', 'doctor', 'doctor_name', 'date', 'day', 'time', 'is_booked']
 
     def validate(self, data):
-        # Access the user from the context
         user = self.context['request'].user
-        
-        # Ensure the user is a doctor or has access to their doctor profile
-        # Adjust 'doctor_profile' based on your actual model structure
         doctor = user
                 
         date = data.get('date')
@@ -99,7 +95,6 @@ class DoctorSlotSerializer(serializers.ModelSerializer):
         except ValueError:
             raise serializers.ValidationError("Invalid time values.")
 
-        # Check for overlaps
         existing_slots = DoctorSlot.objects.filter(doctor=doctor, date=date)
         if self.instance:
             existing_slots = existing_slots.exclude(pk=self.instance.pk)
@@ -109,7 +104,6 @@ class DoctorSlotSerializer(serializers.ModelSerializer):
             ex_start = to_minutes(ex_start_str)
             ex_end = to_minutes(ex_end_str)
 
-            # Check overlap: (StartA < EndB) and (EndA > StartB)
             if new_start < ex_end and new_end > ex_start:
                 raise serializers.ValidationError(f"This time slot overlaps with an existing slot: {slot.time}")
         

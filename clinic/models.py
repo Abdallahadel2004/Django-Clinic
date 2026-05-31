@@ -62,7 +62,7 @@ class Appointment(models.Model):
     status = models.CharField(max_length=15, choices=STATUS_CHOICES, default='Pending')
     consultation_fee = models.DecimalField(max_digits=10, decimal_places=2)
     
-    payment_status = models.CharField(max_length=15, default='Pending') # Paid, Pending
+    payment_status = models.CharField(max_length=15, default='Pending') 
     payment_method = models.CharField(max_length=50, blank=True, null=True)
     payment_card_last4 = models.CharField(max_length=4, blank=True, null=True)
     paid_at = models.DateTimeField(blank=True, null=True)

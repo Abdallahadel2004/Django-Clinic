@@ -35,7 +35,6 @@ class RegisterViewSet(viewsets.ModelViewSet):
                     "email": existing_user.email
                 }, status=status.HTTP_200_OK)
             else:
-                # لو متفعل وجاهز، نرجعه للـ Login
                 return Response({
                     "error": "This email is already registered and verified. You can log in directly."
                 }, status=status.HTTP_400_BAD_REQUEST)
@@ -184,14 +183,12 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         except User.DoesNotExist:
             return Response({"error": "The specified doctor does not exist in the system."}, status=status.HTTP_400_BAD_REQUEST)
 
-    # ─── في AppointmentViewSet، استبدل الـ cancel_appointment action بالكود ده ───
 
     @action(detail=True, methods=['post'], url_path='cancel')
     def cancel_appointment(self, request, pk=None):
         appointment = self.get_object()
         cancel_reason = request.data.get('reason', 'No specific reason provided.')
 
-        # Security: doctor أو patient أو admin فقط
         if request.user.role != 'admin' \
                 and appointment.doctor != request.user \
                 and appointment.patient != request.user:
@@ -309,21 +306,18 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     def approve_appointment(self, request, pk=None):
         appointment = self.get_object()
 
-        # حماية: التأكد إن الدكتور المسؤول أو الأدمن هو اللي بيوافق
         if request.user.role != 'admin' and appointment.doctor != request.user:
             return Response(
                 {"error": "You do not have permission to approve this appointment."}, 
                 status=status.HTTP_403_FORBIDDEN
             )
 
-        # منطق: التأكد إن الموعد مش متوافق عليه أصلاً
         if appointment.status == 'Confirmed':
             return Response(
                 {"error": "This appointment is already confirmed."}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # التعديل والحفظ المباشر في الداتابيز 🚀
         appointment.status = 'Confirmed'
         appointment.save()
 
