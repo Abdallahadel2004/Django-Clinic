@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
@@ -121,7 +122,6 @@ USE_TZ = True
 STATIC_URL = 'static/'
 
 CORS_ALLOW_ALL_ORIGINS = True
-AUTH_USER_MODEL = 'clinic.User'
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
@@ -139,3 +139,8 @@ EMAIL_HOST_USER = 'marcoreda51@gmail.com'
 EMAIL_HOST_PASSWORD = 'fuiq mwik myth qdpo' 
 
 DEFAULT_FROM_EMAIL = f'CarePulse <{EMAIL_HOST_USER}>'
+
+AUTH_USER_MODEL = 'clinic.CustomUser'
+
+GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
+GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')

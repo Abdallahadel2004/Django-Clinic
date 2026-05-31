@@ -6,6 +6,7 @@ from rest_framework.validators import UniqueValidator
 
 User = get_user_model()
 
+
 class UserSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
     role_display = serializers.CharField(source='get_role_display', read_only=True)
@@ -29,28 +30,41 @@ class SpecialtySerializer(serializers.ModelSerializer):
 
 
 class UserRegisterSerializer(serializers.ModelSerializer):
-    username = serializers.CharField(
-        validators=[UniqueValidator(queryset=User.objects.all(), message="This username is already taken.")]
-    )
-    email = serializers.EmailField(
-        required=True,
-        validators=[UniqueValidator(queryset=User.objects.all(), message="A user with this email already exists.")]
-    )
+    # ✅ username is now optional (auto-generated from email)
+    username = serializers.CharField(required=False, allow_blank=True)
+    email = serializers.EmailField(required=True)
     password = serializers.CharField(write_only=True, style={'input_type': 'password'})
 
     class Meta:
         model = User
         fields = ['id', 'username', 'email', 'password', 'role', 'phone', 'first_name', 'last_name']
 
+    def validate_email(self, value):
+        # ✅ Check uniqueness only for NEW registrations (exclude inactive re-registrations — handled in viewset)
+        if User.objects.filter(email=value, is_active=True).exists():
+            raise serializers.ValidationError('A verified account with this email already exists.')
+        return value
+
     def create(self, validated_data):
+        # ✅ Auto-generate username from email if not provided
+        email = validated_data['email']
+        username = validated_data.get('username') or email.split('@')[0]
+
+        # Ensure username uniqueness
+        base = username
+        counter = 1
+        while User.objects.filter(username=username).exists():
+            username = f'{base}{counter}'
+            counter += 1
+
         user = User.objects.create_user(
-            username=validated_data['username'],
-            email=validated_data['email'],
+            email=email,
+            username=username,
             password=validated_data['password'],
             role=validated_data.get('role', 'patient'),
             phone=validated_data.get('phone', ''),
             first_name=validated_data.get('first_name', ''),
-            last_name=validated_data.get('last_name', '')
+            last_name=validated_data.get('last_name', ''),
         )
         return user
 
@@ -60,7 +74,8 @@ class DoctorProfileSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = DoctorProfile
-        fields = ['id', 'specialty', 'specialty_name', 'bio', 'consultation_fee', 'clinic_address', 'clinic_phone', 'is_approved']
+        fields = ['id', 'specialty', 'specialty_name', 'bio', 'consultation_fee',
+                  'clinic_address', 'clinic_phone', 'is_approved']
         read_only_fields = ['is_approved']
 
 
@@ -93,7 +108,8 @@ class PatientProfileSerializer(serializers.ModelSerializer):
 
 
 class DoctorDetailSerializer(serializers.ModelSerializer):
-    profile = DoctorProfileSerializer(source='doctor_profile', read_only=True)
+    # ✅ renamed from 'profile' to 'doctor_profile' to match frontend usage
+    doctor_profile = DoctorProfileSerializer(read_only=True)
     full_name = serializers.SerializerMethodField()
     role_display = serializers.CharField(source='get_role_display', read_only=True)
 
@@ -101,7 +117,7 @@ class DoctorDetailSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
-            'full_name', 'phone', 'role', 'role_display', 'is_active', 'profile'
+            'full_name', 'phone', 'role', 'role_display', 'is_active', 'doctor_profile'
         ]
 
     def get_full_name(self, obj):
@@ -145,18 +161,11 @@ class DoctorSlotSerializer(serializers.ModelSerializer):
             ex_start = to_minutes(ex_start_str)
             ex_end = to_minutes(ex_end_str)
             if new_start < ex_end and new_end > ex_start:
-                raise serializers.ValidationError(f"This time slot overlaps with an existing slot: {slot.time}")
+                raise serializers.ValidationError(
+                    f"This time slot overlaps with an existing slot: {slot.time}"
+                )
 
         return data
-
-
-class DoctorAvailabilitySerializer(serializers.ModelSerializer):
-    doctor_name = serializers.ReadOnlyField(source='doctor.get_full_name')
-
-    class Meta:
-        model = DoctorAvailability
-        fields = ['id', 'doctor', 'doctor_name', 'day', 'start_time', 'end_time', 'is_active']
-        read_only_fields = ['doctor', 'doctor_name']
 
 
 class AppointmentSerializer(serializers.ModelSerializer):
@@ -175,17 +184,20 @@ class AppointmentSerializer(serializers.ModelSerializer):
         read_only_fields = ['patient', 'status', 'payment_status', 'paid_at']
 
 
+# ✅ Fixed: uses email field for login
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
+    username_field = 'email'  # ← tell SimpleJWT to use email
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
         token['role'] = user.role
-        token['username'] = user.username
+        token['email'] = user.email
         return token
 
     def validate(self, attrs):
         data = super().validate(attrs)
         data['role'] = self.user.role
-        data['username'] = self.user.username
+        data['email'] = self.user.email
         data['uid'] = self.user.id
         return data
