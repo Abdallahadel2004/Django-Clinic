@@ -7,7 +7,7 @@ from django.utils import timezone
 from django.db import transaction
 from django.core.mail import send_mail
 
-from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, UserOTP, DoctorAvailability, PlatformConfig, Payment
+from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, UserOTP, DoctorAvailability, PlatformConfig, Payment, Refund
 from .serializers import (
     UserSerializer, UserRegisterSerializer, SpecialtySerializer,
     DoctorProfileSerializer, PatientProfileSerializer, DoctorDetailSerializer,
@@ -274,27 +274,66 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if appointment.status == 'Cancelled':
             return Response({'error': 'This appointment is already cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        cancelled_by = 'patient' if request.user == appointment.patient else 'doctor'
+        if request.user == appointment.patient:
+            cancelled_by = 'patient'
+        elif request.user == appointment.doctor:
+            cancelled_by = 'doctor'
+        else:
+            cancelled_by = 'admin'
+
         try:
+            from decimal import Decimal
+            refund_amount = Decimal('0.00')
+
             with transaction.atomic():
                 appointment.status = 'Cancelled'
+                appointment.cancellation_reason = cancel_reason
+                appointment.cancelled_by = cancelled_by
+                appointment.cancelled_at = timezone.now()
+
                 if appointment.payment_status == 'Paid':
                     appointment.payment_status = 'Refunded'
+
+                    # Fetch and lock the related Payment record
+                    payment = Payment.objects.select_for_update().get(appointment=appointment)
+                    payment.status = 'Refunded'
+                    payment.save()
+
+                    # Create Refund record (full refund policy)
+                    Refund.objects.create(
+                        appointment=appointment,
+                        payment=payment,
+                        refund_amount=payment.total_amount,
+                        commission_retained=Decimal('0.00'),
+                        reason=cancel_reason,
+                        initiated_by=cancelled_by,
+                    )
+                    refund_amount = payment.total_amount
+
                 appointment.save()
+
                 if appointment.slot:
-                    slot = appointment.slot
+                    slot = DoctorSlot.objects.select_for_update().get(id=appointment.slot_id)
                     slot.is_booked = False
                     slot.save()
 
+            # ✅ Send notification emails outside the atomic block
             self._send_cancellation_email(appointment, cancel_reason)
             if cancelled_by == 'patient':
                 self._send_doctor_cancellation_email(appointment, cancel_reason)
 
             return Response({
                 'message': 'Appointment cancelled successfully. Slot freed, patient notified, and refund processed.',
-                'appointment_status': appointment.status,
-                'payment_status': appointment.payment_status
+                'appointment_status': 'Cancelled',
+                'payment_status': appointment.payment_status,
+                'refund_details': {
+                    'refund_amount': f'{refund_amount:.2f}',
+                    'commission_retained': '0.00',
+                    'refund_policy': 'full_refund',
+                    'initiated_by': cancelled_by
+                }
             }, status=status.HTTP_200_OK)
+
         except Exception as e:
             return Response({'error': f'An error occurred during cancellation: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
