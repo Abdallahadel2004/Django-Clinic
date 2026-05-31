@@ -1,15 +1,32 @@
 from rest_framework import serializers
-from rest_framework.validators import UniqueValidator
-from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth import get_user_model
-from .models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment
+from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, DoctorAvailability
+from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework.validators import UniqueValidator
 
 User = get_user_model()
+
+class UserSerializer(serializers.ModelSerializer):
+    full_name = serializers.SerializerMethodField()
+    role_display = serializers.CharField(source='get_role_display', read_only=True)
+
+    class Meta:
+        model = User
+        fields = [
+            'id', 'username', 'email', 'first_name', 'last_name',
+            'full_name', 'phone', 'role', 'role_display', 'is_active', 'is_staff'
+        ]
+        read_only_fields = ['id', 'full_name', 'role_display']
+
+    def get_full_name(self, obj):
+        return obj.get_full_name() or obj.username
+
 
 class SpecialtySerializer(serializers.ModelSerializer):
     class Meta:
         model = Specialty
         fields = '__all__'
+
 
 class UserRegisterSerializer(serializers.ModelSerializer):
     username = serializers.CharField(
@@ -19,7 +36,6 @@ class UserRegisterSerializer(serializers.ModelSerializer):
         required=True,
         validators=[UniqueValidator(queryset=User.objects.all(), message="A user with this email already exists.")]
     )
-    
     password = serializers.CharField(write_only=True, style={'input_type': 'password'})
 
     class Meta:
@@ -38,29 +54,59 @@ class UserRegisterSerializer(serializers.ModelSerializer):
         )
         return user
 
+
 class DoctorProfileSerializer(serializers.ModelSerializer):
     specialty_name = serializers.ReadOnlyField(source='specialty.name')
 
     class Meta:
         model = DoctorProfile
-        fields = ['id', 'specialty', 'specialty_name', 'bio', 'consultation_fee', 'clinic_address', 'is_approved']
+        fields = ['id', 'specialty', 'specialty_name', 'bio', 'consultation_fee', 'clinic_address', 'clinic_phone', 'is_approved']
         read_only_fields = ['is_approved']
+
+
+class DoctorAvailabilitySerializer(serializers.ModelSerializer):
+    doctor_name = serializers.ReadOnlyField(source='doctor.get_full_name')
+    doctor = serializers.PrimaryKeyRelatedField(
+        queryset=User.objects.filter(role='doctor'),
+        required=False
+    )
+
+    class Meta:
+        model = DoctorAvailability
+        fields = ['id', 'doctor', 'doctor_name', 'day', 'start_time', 'end_time', 'is_active']
+
+    def validate(self, data):
+        if data['end_time'] <= data['start_time']:
+            raise serializers.ValidationError('end_time must be greater than start_time.')
+        return data
+
+    def create(self, validated_data):
+        if 'doctor' not in validated_data:
+            validated_data['doctor'] = self.context['request'].user
+        return super().create(validated_data)
+
 
 class PatientProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = PatientProfile
         fields = ['id', 'date_of_birth', 'gender', 'blood_type', 'address']
 
+
 class DoctorDetailSerializer(serializers.ModelSerializer):
     profile = DoctorProfileSerializer(source='doctor_profile', read_only=True)
     full_name = serializers.SerializerMethodField()
+    role_display = serializers.CharField(source='get_role_display', read_only=True)
 
     class Meta:
         model = User
-        fields = ['id', 'username', 'email', 'first_name', 'last_name', 'full_name', 'phone', 'profile']
+        fields = [
+            'id', 'username', 'email', 'first_name', 'last_name',
+            'full_name', 'phone', 'role', 'role_display', 'is_active', 'profile'
+        ]
 
     def get_full_name(self, obj):
         return obj.get_full_name() or obj.username
+
 
 class DoctorSlotSerializer(serializers.ModelSerializer):
     doctor_name = serializers.ReadOnlyField(source='doctor.get_full_name')
@@ -73,7 +119,6 @@ class DoctorSlotSerializer(serializers.ModelSerializer):
     def validate(self, data):
         user = self.context['request'].user
         doctor = user
-                
         date = data.get('date')
         time_str = data.get('time')
 
@@ -99,11 +144,20 @@ class DoctorSlotSerializer(serializers.ModelSerializer):
             ex_start_str, ex_end_str = slot.time.split(' - ')
             ex_start = to_minutes(ex_start_str)
             ex_end = to_minutes(ex_end_str)
-
             if new_start < ex_end and new_end > ex_start:
                 raise serializers.ValidationError(f"This time slot overlaps with an existing slot: {slot.time}")
-        
+
         return data
+
+
+class DoctorAvailabilitySerializer(serializers.ModelSerializer):
+    doctor_name = serializers.ReadOnlyField(source='doctor.get_full_name')
+
+    class Meta:
+        model = DoctorAvailability
+        fields = ['id', 'doctor', 'doctor_name', 'day', 'start_time', 'end_time', 'is_active']
+        read_only_fields = ['doctor', 'doctor_name']
+
 
 class AppointmentSerializer(serializers.ModelSerializer):
     patient_name = serializers.ReadOnlyField(source='patient.get_full_name')
@@ -114,11 +168,12 @@ class AppointmentSerializer(serializers.ModelSerializer):
         model = Appointment
         fields = [
             'id', 'patient', 'patient_name', 'doctor', 'doctor_name', 'slot', 'slot_details',
-            'status', 'consultation_fee', 'payment_status', 'payment_method', 
+            'status', 'consultation_fee', 'payment_status', 'payment_method',
             'payment_card_last4', 'paid_at', 'created_at',
             'diagnosis', 'prescription', 'doctor_notes'
         ]
         read_only_fields = ['patient', 'status', 'payment_status', 'paid_at']
+
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
@@ -134,14 +189,3 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         data['username'] = self.user.username
         data['uid'] = self.user.id
         return data
-
-__all__ = [
-    'UserRegisterSerializer',
-    'SpecialtySerializer',
-    'DoctorProfileSerializer',
-    'PatientProfileSerializer',
-    'DoctorDetailSerializer',
-    'DoctorSlotSerializer',
-    'AppointmentSerializer',
-    'CustomTokenObtainPairSerializer',
-]

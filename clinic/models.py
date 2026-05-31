@@ -30,11 +30,11 @@ class DoctorProfile(models.Model):
     bio = models.TextField(blank=True, null=True)
     consultation_fee = models.DecimalField(max_digits=10, decimal_places=2, default=250.00)
     clinic_address = models.TextField(blank=True, null=True)
-    is_approved = models.BooleanField(default=False) 
+    clinic_phone = models.CharField(max_length=20, blank=True, null=True)
+    is_approved = models.BooleanField(default=False)
 
     def __str__(self):
         return f"Dr. {self.user.get_full_name() or self.user.username}"
-
 
 class DoctorSlot(models.Model):
     doctor = models.ForeignKey(User, on_delete=models.CASCADE, related_name='slots')
@@ -47,12 +47,39 @@ class DoctorSlot(models.Model):
         return f"Dr. {self.doctor.username} - {self.date} @ {self.time}"
 
 
+class DoctorAvailability(models.Model):
+    WEEKDAY_CHOICES = [
+        ('mon', 'Monday'),
+        ('tue', 'Tuesday'),
+        ('wed', 'Wednesday'),
+        ('thu', 'Thursday'),
+        ('fri', 'Friday'),
+        ('sat', 'Saturday'),
+        ('sun', 'Sunday'),
+    ]
+
+    doctor = models.ForeignKey(User, on_delete=models.CASCADE, related_name='availabilities')
+    day = models.CharField(max_length=3, choices=WEEKDAY_CHOICES)
+    start_time = models.TimeField()
+    end_time = models.TimeField()
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        verbose_name = 'Doctor Availability'
+        verbose_name_plural = 'Doctor Availabilities'
+        ordering = ['doctor', 'day', 'start_time']
+
+    def __str__(self):
+        return f"{self.doctor.username} - {self.get_day_display()} {self.start_time}-{self.end_time}"
+
+
 class Appointment(models.Model):
     STATUS_CHOICES = [
         ('Pending', 'Pending'),
         ('Confirmed', 'Confirmed'),
         ('Completed', 'Completed'),
         ('Cancelled', 'Cancelled'),
+        ('Rejected', 'Rejected'),
     ]
     
     patient = models.ForeignKey(User, on_delete=models.CASCADE, related_name='patient_appointments')
