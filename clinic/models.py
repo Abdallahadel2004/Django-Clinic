@@ -350,6 +350,7 @@ class Payment(models.Model):
     )
     payment_method = models.CharField(max_length=50, default='Online card')
     card_last4 = models.CharField(max_length=4, blank=True, null=True)
+    stripe_payment_intent_id = models.CharField(max_length=255, blank=True, null=True, help_text="Stripe PaymentIntent ID")
     status = models.CharField(
         max_length=20,
         choices=PAYMENT_STATUS_CHOICES,
@@ -409,6 +410,7 @@ class Refund(models.Model):
     )
     reason = models.TextField(blank=True, null=True)
     initiated_by = models.CharField(max_length=10, choices=INITIATED_BY_CHOICES)
+    stripe_refund_id = models.CharField(max_length=255, blank=True, null=True, help_text="Stripe Refund ID")
     refunded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
