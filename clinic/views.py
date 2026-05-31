@@ -98,13 +98,10 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='cancel')
     def cancel_appointment(self, request, pk=None):
         appointment = self.get_object()
-        # logic for cancellation (Ensure only one version of _send_cancellation_email exists)
-        # [أضفت هنا منطق الإلغاء الموحد]
         appointment.status = 'Cancelled'
         appointment.save()
         return Response({"message": "Cancelled"})
 
-    # ... (بقية الـ Actions مثل complete, approve)
 
 # --- Profiles & Other ---
 class SpecialtyViewSet(viewsets.ModelViewSet):
