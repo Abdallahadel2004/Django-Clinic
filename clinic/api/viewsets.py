@@ -189,18 +189,41 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         slot_id = request.data.get('slot_id')
         doctor_id = request.data.get('doctor_id')
         fee = request.data.get('consultation_fee')
-        last4 = request.data.get('payment_card_last4', '')
+        payment_method_id = request.data.get('payment_method_id', 'pm_card_visa')
 
         if not slot_id or not doctor_id or fee is None:
             return Response({'error': 'Missing required fields: slot_id, doctor_id, consultation_fee.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
             from decimal import Decimal
+            import stripe
+            
             appointment = None
             commission_pct = Decimal('0.00')
             commission_fee = Decimal('0.00')
             doctor_payout = Decimal('0.00')
             total_amount = Decimal(str(fee))
+
+            # Retrieve card details safely from Stripe payment method
+            try:
+                pm = stripe.PaymentMethod.retrieve(payment_method_id)
+                card_last4 = pm.card.last4
+            except Exception:
+                card_last4 = '4242'
+
+            try:
+                intent = stripe.PaymentIntent.create(
+                    amount=int(total_amount * 100),
+                    currency='egp',
+                    payment_method=payment_method_id,
+                    confirm=True,
+                    automatic_payment_methods={
+                        'enabled': True,
+                        'allow_redirects': 'never'
+                    }
+                )
+            except stripe.error.StripeError as e:
+                return Response({'error': f'Stripe payment failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
             with transaction.atomic():
                 slot = DoctorSlot.objects.select_for_update().get(id=slot_id, doctor_id=doctor_id, is_booked=False)
@@ -219,8 +242,8 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                     consultation_fee=total_amount,
                     status='Pending',
                     payment_status='Paid',
-                    payment_method='Online card',
-                    payment_card_last4=last4,
+                    payment_method='Stripe Card',
+                    payment_card_last4=card_last4,
                     paid_at=timezone.now(),
                     platform_commission_percentage=commission_pct,
                     platform_commission_fee=commission_fee,
@@ -233,8 +256,9 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                     commission_percentage=commission_pct,
                     commission_fee=commission_fee,
                     doctor_payout=doctor_payout,
-                    payment_method='Online card',
-                    card_last4=last4,
+                    payment_method='Stripe Card',
+                    card_last4=card_last4,
+                    stripe_payment_intent_id=intent.id,
                     status='Completed',
                 )
 
@@ -253,7 +277,8 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                     'platform_commission_fee': f'{commission_fee:.2f}',
                     'doctor_payout': f'{doctor_payout:.2f}',
                     'payment_status': 'Paid',
-                    'payment_method': 'Online card'
+                    'payment_method': 'Stripe Card',
+                    'stripe_payment_intent_id': intent.id
                 }
             }, status=status.HTTP_201_CREATED)
 
@@ -297,6 +322,18 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                     # Fetch and lock the related Payment record
                     payment = Payment.objects.select_for_update().get(appointment=appointment)
                     payment.status = 'Refunded'
+                    
+                    stripe_refund_id = None
+                    if payment.stripe_payment_intent_id:
+                        import stripe
+                        try:
+                            stripe_refund = stripe.Refund.create(
+                                payment_intent=payment.stripe_payment_intent_id
+                            )
+                            stripe_refund_id = stripe_refund.id
+                        except stripe.error.StripeError as e:
+                            raise ValueError(f"Stripe refund failed: {str(e)}")
+
                     payment.save()
 
                     # Create Refund record (full refund policy)
@@ -307,6 +344,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                         commission_retained=Decimal('0.00'),
                         reason=cancel_reason,
                         initiated_by=cancelled_by,
+                        stripe_refund_id=stripe_refund_id,
                     )
                     refund_amount = payment.total_amount
 

@@ -144,3 +144,7 @@ AUTH_USER_MODEL = 'clinic.CustomUser'
 
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET')
+
+import stripe
+STRIPE_SECRET_KEY = os.getenv('STRIPE_KEY')
+stripe.api_key = STRIPE_SECRET_KEY
