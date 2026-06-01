@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, DoctorAvailability, Payment, Refund
+from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, DoctorAvailability, Payment, Refund, Review
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework.validators import UniqueValidator
 
@@ -215,6 +215,15 @@ class AppointmentSerializer(serializers.ModelSerializer):
             'platform_commission_percentage', 'platform_commission_fee',
             'doctor_payout', 'cancellation_reason', 'cancelled_by', 'cancelled_at'
         ]
+
+
+class ReviewSerializer(serializers.ModelSerializer):
+    patient_name = serializers.ReadOnlyField(source='patient.get_full_name')
+
+    class Meta:
+        model = Review
+        fields = ['id', 'appointment', 'patient', 'patient_name', 'doctor', 'rating', 'comment', 'created_at']
+        read_only_fields = ['patient', 'doctor', 'created_at']
 
 
 # ✅ Fixed: uses email field for login

@@ -423,3 +423,28 @@ class Refund(models.Model):
 
     def __str__(self):
         return f"Refund #{self.id} for Appt #{self.appointment_id}: {self.refund_amount} EGP"
+
+
+class Review(models.Model):
+    appointment = models.OneToOneField(
+        'Appointment', on_delete=models.CASCADE, related_name='review'
+    )
+    patient = models.ForeignKey(
+        CustomUser, on_delete=models.CASCADE, related_name='reviews'
+    )
+    doctor = models.ForeignKey(
+        CustomUser, on_delete=models.CASCADE, related_name='doctor_reviews'
+    )
+    rating = models.IntegerField()
+    comment = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['doctor']),
+            models.Index(fields=['appointment']),
+        ]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Review #{self.id} for Appt #{self.appointment_id} - {self.rating}⭐"
