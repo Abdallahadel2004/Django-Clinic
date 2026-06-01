@@ -2,7 +2,7 @@ from rest_framework import serializers
 from rest_framework.validators import UniqueValidator
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from django.contrib.auth import get_user_model
-from .models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment
+from .models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, Review
 
 User = get_user_model()
 
@@ -120,6 +120,15 @@ class AppointmentSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['patient', 'status', 'payment_status', 'paid_at']
 
+
+class ReviewSerializer(serializers.ModelSerializer):
+    patient_name = serializers.ReadOnlyField(source='patient.get_full_name')
+
+    class Meta:
+        model = Review
+        fields = ['id', 'appointment', 'patient', 'patient_name', 'doctor', 'rating', 'comment', 'created_at']
+        read_only_fields = ['patient', 'doctor', 'created_at']
+
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
     def get_token(cls, user):
@@ -143,5 +152,6 @@ __all__ = [
     'DoctorDetailSerializer',
     'DoctorSlotSerializer',
     'AppointmentSerializer',
+    'ReviewSerializer',
     'CustomTokenObtainPairSerializer',
 ]

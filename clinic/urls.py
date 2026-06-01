@@ -7,7 +7,7 @@ from clinic.api.viewsets import (
     RegisterViewSet, DoctorListViewSet, DoctorSlotViewSet,
     AppointmentViewSet, SpecialtyViewSet,
     DoctorProfileViewSet, UserViewSet, VerifyOTPView,
-    PatientProfileViewSet, DoctorAvailabilityViewSet,
+    PatientProfileViewSet, DoctorAvailabilityViewSet, ReviewViewSet,
 )
 from clinic.api.google_auth_view import GoogleLoginView   
 from .serializers import CustomTokenObtainPairSerializer
@@ -27,6 +27,7 @@ router.register(r'specialties',      SpecialtyViewSet,         basename='special
 router.register(r'users',            UserViewSet,              basename='user')
 router.register(r'doctor-profiles',  DoctorProfileViewSet,     basename='doctor-profile')
 router.register(r'patient-profiles', PatientProfileViewSet,    basename='patient-profile')
+router.register(r'reviews',          ReviewViewSet,            basename='reviews')
 
 urlpatterns = [
     path('', include(router.urls)),

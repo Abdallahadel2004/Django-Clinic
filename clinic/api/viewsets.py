@@ -7,11 +7,11 @@ from django.utils import timezone
 from django.db import transaction
 from django.core.mail import send_mail
 
-from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, UserOTP, DoctorAvailability, PlatformConfig, Payment, Refund
+from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, UserOTP, DoctorAvailability, PlatformConfig, Payment, Refund, Review
 from .serializers import (
     UserSerializer, UserRegisterSerializer, SpecialtySerializer,
     DoctorProfileSerializer, PatientProfileSerializer, DoctorDetailSerializer,
-    DoctorSlotSerializer, AppointmentSerializer, DoctorAvailabilitySerializer
+    DoctorSlotSerializer, AppointmentSerializer, DoctorAvailabilitySerializer, ReviewSerializer
 )
 from .permissions import IsAdminOrReadOnly
 
@@ -661,5 +661,65 @@ class PatientProfileViewSet(viewsets.ModelViewSet):
         serializer.save()
         return Response(serializer.data)
     
+
+
+class ReviewViewSet(viewsets.ModelViewSet):
+    """Create and list reviews. POST /reviews/ enforces appointment ownership and completed status.
+    GET /reviews/?doctor=<id> returns public reviews for a doctor.
+    GET /reviews/my/ returns current patient's reviews.
+    """
+    queryset = Review.objects.all()
+    serializer_class = ReviewSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        qs = Review.objects.all()
+        doctor_id = self.request.query_params.get('doctor')
+        if doctor_id:
+            return qs.filter(doctor_id=doctor_id)
+        if user.role == 'doctor':
+            return qs.filter(doctor=user)
+        # patients see only their reviews by default
+        return qs.filter(patient=user)
+
+    @action(detail=False, methods=['get'], url_path='my')
+    def my_reviews(self, request):
+        qs = Review.objects.filter(patient=request.user)
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
+
+    def create(self, request, *args, **kwargs):
+        appointment_id = request.data.get('appointment')
+        rating = request.data.get('rating')
+        comment = request.data.get('comment', '').strip()
+        if not appointment_id or rating is None:
+            return Response({'error': 'appointment and rating are required.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            appointment = Appointment.objects.get(id=appointment_id)
+        except Appointment.DoesNotExist:
+            return Response({'error': 'Appointment not found.'}, status=status.HTTP_400_BAD_REQUEST)
+        if appointment.patient != request.user:
+            return Response({'error': 'You can only review your own appointment.'}, status=status.HTTP_403_FORBIDDEN)
+        if appointment.status != 'Completed':
+            return Response({'error': 'Only completed appointments can be reviewed.'}, status=status.HTTP_400_BAD_REQUEST)
+        if hasattr(appointment, 'review'):
+            return Response({'error': 'This appointment has already been reviewed.'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            r = int(rating)
+            if r < 1 or r > 5:
+                raise ValueError()
+        except Exception:
+            return Response({'error': 'Rating must be an integer between 1 and 5.'}, status=status.HTTP_400_BAD_REQUEST)
+        review = Review.objects.create(
+            appointment=appointment,
+            patient=request.user,
+            doctor=appointment.doctor,
+            rating=r,
+            comment=comment or None,
+        )
+        serializer = self.get_serializer(review)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
 
 
