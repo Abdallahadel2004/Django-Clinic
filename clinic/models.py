@@ -1,5 +1,6 @@
 import random
 from datetime import timedelta
+from decimal import Decimal
 
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
@@ -118,6 +119,18 @@ class DoctorSlot(models.Model):
     time      = models.CharField(max_length=50)
     is_booked = models.BooleanField(default=False)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=['doctor', 'date', 'time'],
+                name='unique_doctor_date_time_slot'
+            )
+        ]
+        indexes = [
+            models.Index(fields=['doctor', 'date']),
+            models.Index(fields=['is_booked']),
+        ]
+
     def __str__(self):
         return f'Dr. {self.doctor.username} - {self.date} @ {self.time}'
 
@@ -182,6 +195,42 @@ class Appointment(models.Model):
     prescription      = models.TextField(blank=True, null=True)
     doctor_notes      = models.TextField(blank=True, null=True)
 
+    # ── NEW financial tracking fields ──
+    platform_commission_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=0.00,
+        help_text="Commission % snapshot at booking time"
+    )
+    platform_commission_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.00,
+        help_text="Commission amount deducted"
+    )
+    doctor_payout = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.00,
+        help_text="Net doctor payout after commission"
+    )
+    cancellation_reason = models.TextField(blank=True, null=True)
+    cancelled_by = models.CharField(
+        max_length=10,
+        blank=True,
+        null=True,
+        choices=[('patient', 'Patient'), ('doctor', 'Doctor'), ('admin', 'Admin')]
+    )
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=['patient', 'status']),
+            models.Index(fields=['doctor', 'status']),
+            models.Index(fields=['payment_status']),
+            models.Index(fields=['created_at']),
+        ]
+
     def __str__(self):
         return f'Appt #{self.id}: {self.patient.username} with Dr. {self.doctor.username}'
 
@@ -225,3 +274,150 @@ class UserOTP(models.Model):
 
     def __str__(self):
         return f'{self.user.username} - {self.code}'
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Platform Configuration Model [NEW]
+# ─────────────────────────────────────────────────────────────────────────────
+
+class PlatformConfig(models.Model):
+    """
+    Singleton-like config table. Only one row should exist.
+    Stores platform-wide financial settings.
+    """
+    commission_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        default=10.00,
+        help_text="Platform commission percentage (e.g., 10.00 means 10%)"
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Platform Configuration"
+        verbose_name_plural = "Platform Configuration"
+
+    def save(self, *args, **kwargs):
+        # Enforce singleton: always use pk=1
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def get_config(cls):
+        """Returns the singleton config, creating with defaults if needed."""
+        config, _ = cls.objects.get_or_create(pk=1)
+        return config
+
+    def __str__(self):
+        return f"Platform Commission: {self.commission_percentage}%"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Payment Model [NEW]
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Payment(models.Model):
+    PAYMENT_STATUS_CHOICES = [
+        ('Completed', 'Completed'),
+        ('Refunded', 'Refunded'),
+        ('Partially_Refunded', 'Partially Refunded'),
+    ]
+
+    appointment = models.OneToOneField(
+        'Appointment',
+        on_delete=models.CASCADE,
+        related_name='payment_record'
+    )
+    total_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Full consultation fee paid by patient"
+    )
+    commission_percentage = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        help_text="Platform commission % at time of booking (snapshot)"
+    )
+    commission_fee = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Platform commission amount = total_amount * (commission_percentage / 100)"
+    )
+    doctor_payout = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Net amount payable to doctor = total_amount - commission_fee"
+    )
+    payment_method = models.CharField(max_length=50, default='Online card')
+    card_last4 = models.CharField(max_length=4, blank=True, null=True)
+    status = models.CharField(
+        max_length=20,
+        choices=PAYMENT_STATUS_CHOICES,
+        default='Completed'
+    )
+    paid_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Payment"
+        verbose_name_plural = "Payments"
+        indexes = [
+            models.Index(fields=['appointment']),
+            models.Index(fields=['status']),
+            models.Index(fields=['paid_at']),
+        ]
+
+    def __str__(self):
+        return (
+            f"Payment #{self.id} for Appt #{self.appointment_id}: "
+            f"Total={self.total_amount}, Commission={self.commission_fee}, "
+            f"DoctorPayout={self.doctor_payout}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Refund Model [NEW]
+# ─────────────────────────────────────────────────────────────────────────────
+
+class Refund(models.Model):
+    INITIATED_BY_CHOICES = [
+        ('patient', 'Patient'),
+        ('doctor', 'Doctor'),
+        ('admin', 'Admin'),
+    ]
+
+    appointment = models.OneToOneField(
+        'Appointment',
+        on_delete=models.CASCADE,
+        related_name='refund_record'
+    )
+    payment = models.OneToOneField(
+        'Payment',
+        on_delete=models.CASCADE,
+        related_name='refund'
+    )
+    refund_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Amount refunded to patient (equals total_amount — full refund policy)"
+    )
+    commission_retained = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=0.00,
+        help_text="Commission amount retained by platform (0.00 for full refund policy)"
+    )
+    reason = models.TextField(blank=True, null=True)
+    initiated_by = models.CharField(max_length=10, choices=INITIATED_BY_CHOICES)
+    refunded_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Refund"
+        verbose_name_plural = "Refunds"
+        indexes = [
+            models.Index(fields=['appointment']),
+            models.Index(fields=['refunded_at']),
+        ]
+
+    def __str__(self):
+        return f"Refund #{self.id} for Appt #{self.appointment_id}: {self.refund_amount} EGP"

@@ -7,7 +7,7 @@ from django.utils import timezone
 from django.db import transaction
 from django.core.mail import send_mail
 
-from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, UserOTP, DoctorAvailability
+from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, UserOTP, DoctorAvailability, PlatformConfig, Payment, Refund
 from .serializers import (
     UserSerializer, UserRegisterSerializer, SpecialtySerializer,
     DoctorProfileSerializer, PatientProfileSerializer, DoctorDetailSerializer,
@@ -191,36 +191,78 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         fee = request.data.get('consultation_fee')
         last4 = request.data.get('payment_card_last4', '')
 
+        if not slot_id or not doctor_id or fee is None:
+            return Response({'error': 'Missing required fields: slot_id, doctor_id, consultation_fee.'}, status=status.HTTP_400_BAD_REQUEST)
+
         try:
+            from decimal import Decimal
+            appointment = None
+            commission_pct = Decimal('0.00')
+            commission_fee = Decimal('0.00')
+            doctor_payout = Decimal('0.00')
+            total_amount = Decimal(str(fee))
+
             with transaction.atomic():
                 slot = DoctorSlot.objects.select_for_update().get(id=slot_id, doctor_id=doctor_id, is_booked=False)
                 doctor = User.objects.get(id=doctor_id)
+                
+                # Fetch platform commission percentage
+                config = PlatformConfig.get_config()
+                commission_pct = config.commission_percentage
+                commission_fee = (total_amount * commission_pct / Decimal('100')).quantize(Decimal('0.01'))
+                doctor_payout = total_amount - commission_fee
+
                 appointment = Appointment.objects.create(
                     patient=request.user,
                     doctor=doctor,
                     slot=slot,
-                    consultation_fee=fee,
+                    consultation_fee=total_amount,
                     status='Pending',
                     payment_status='Paid',
                     payment_method='Online card',
                     payment_card_last4=last4,
-                    paid_at=timezone.now()
+                    paid_at=timezone.now(),
+                    platform_commission_percentage=commission_pct,
+                    platform_commission_fee=commission_fee,
+                    doctor_payout=doctor_payout,
                 )
+
+                Payment.objects.create(
+                    appointment=appointment,
+                    total_amount=total_amount,
+                    commission_percentage=commission_pct,
+                    commission_fee=commission_fee,
+                    doctor_payout=doctor_payout,
+                    payment_method='Online card',
+                    card_last4=last4,
+                    status='Completed',
+                )
+
                 slot.is_booked = True
                 slot.save()
 
-                # ✅ NEW: send booking confirmation email to patient
-                self._send_booking_confirmation_email(appointment)
+            # ✅ Send booking confirmation email outside the atomic block
+            self._send_booking_confirmation_email(appointment)
 
-                return Response({
-                    'message': 'Appointment booked successfully!',
-                    'appointment_id': appointment.id
-                }, status=status.HTTP_201_CREATED)
+            return Response({
+                'message': 'Appointment booked successfully!',
+                'appointment_id': appointment.id,
+                'financial_summary': {
+                    'total_amount': f'{total_amount:.2f}',
+                    'platform_commission_percentage': f'{commission_pct:.2f}',
+                    'platform_commission_fee': f'{commission_fee:.2f}',
+                    'doctor_payout': f'{doctor_payout:.2f}',
+                    'payment_status': 'Paid',
+                    'payment_method': 'Online card'
+                }
+            }, status=status.HTTP_201_CREATED)
 
         except DoctorSlot.DoesNotExist:
             return Response({'error': 'This appointment slot is unavailable, already booked, or does not belong to this doctor.'}, status=status.HTTP_400_BAD_REQUEST)
         except User.DoesNotExist:
             return Response({'error': 'The specified doctor does not exist in the system.'}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': f'An error occurred during booking: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['post'], url_path='cancel')
     def cancel_appointment(self, request, pk=None):
@@ -232,27 +274,66 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         if appointment.status == 'Cancelled':
             return Response({'error': 'This appointment is already cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        cancelled_by = 'patient' if request.user == appointment.patient else 'doctor'
+        if request.user == appointment.patient:
+            cancelled_by = 'patient'
+        elif request.user == appointment.doctor:
+            cancelled_by = 'doctor'
+        else:
+            cancelled_by = 'admin'
+
         try:
+            from decimal import Decimal
+            refund_amount = Decimal('0.00')
+
             with transaction.atomic():
                 appointment.status = 'Cancelled'
+                appointment.cancellation_reason = cancel_reason
+                appointment.cancelled_by = cancelled_by
+                appointment.cancelled_at = timezone.now()
+
                 if appointment.payment_status == 'Paid':
                     appointment.payment_status = 'Refunded'
+
+                    # Fetch and lock the related Payment record
+                    payment = Payment.objects.select_for_update().get(appointment=appointment)
+                    payment.status = 'Refunded'
+                    payment.save()
+
+                    # Create Refund record (full refund policy)
+                    Refund.objects.create(
+                        appointment=appointment,
+                        payment=payment,
+                        refund_amount=payment.total_amount,
+                        commission_retained=Decimal('0.00'),
+                        reason=cancel_reason,
+                        initiated_by=cancelled_by,
+                    )
+                    refund_amount = payment.total_amount
+
                 appointment.save()
+
                 if appointment.slot:
-                    slot = appointment.slot
+                    slot = DoctorSlot.objects.select_for_update().get(id=appointment.slot_id)
                     slot.is_booked = False
                     slot.save()
 
+            # ✅ Send notification emails outside the atomic block
             self._send_cancellation_email(appointment, cancel_reason)
             if cancelled_by == 'patient':
                 self._send_doctor_cancellation_email(appointment, cancel_reason)
 
             return Response({
                 'message': 'Appointment cancelled successfully. Slot freed, patient notified, and refund processed.',
-                'appointment_status': appointment.status,
-                'payment_status': appointment.payment_status
+                'appointment_status': 'Cancelled',
+                'payment_status': appointment.payment_status,
+                'refund_details': {
+                    'refund_amount': f'{refund_amount:.2f}',
+                    'commission_retained': '0.00',
+                    'refund_policy': 'full_refund',
+                    'initiated_by': cancelled_by
+                }
             }, status=status.HTTP_200_OK)
+
         except Exception as e:
             return Response({'error': f'An error occurred during cancellation: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 

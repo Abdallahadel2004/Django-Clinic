@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import CustomUser, Specialty, DoctorProfile, DoctorSlot, Appointment, PatientProfile, DoctorAvailability
+from .models import CustomUser, Specialty, DoctorProfile, DoctorSlot, Appointment, PatientProfile, DoctorAvailability, PlatformConfig, Payment, Refund
 
 
 class CustomUserAdmin(UserAdmin):
@@ -41,6 +41,32 @@ class AppointmentAdmin(admin.ModelAdmin):
     list_display  = ('id', 'patient', 'doctor', 'status', 'payment_status', 'created_at')
     list_filter   = ('status', 'payment_status')
     search_fields = ('patient__email', 'doctor__email')
+
+
+@admin.register(PlatformConfig)
+class PlatformConfigAdmin(admin.ModelAdmin):
+    list_display = ('commission_percentage', 'updated_at')
+
+    def has_add_permission(self, request):
+        # Only allow one instance
+        return not PlatformConfig.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(Payment)
+class PaymentAdmin(admin.ModelAdmin):
+    list_display = ('id', 'appointment', 'total_amount', 'commission_fee', 'doctor_payout', 'status', 'paid_at')
+    list_filter = ('status', 'paid_at')
+    search_fields = ('appointment__patient__email', 'appointment__doctor__email')
+
+
+@admin.register(Refund)
+class RefundAdmin(admin.ModelAdmin):
+    list_display = ('id', 'appointment', 'refund_amount', 'commission_retained', 'initiated_by', 'refunded_at')
+    list_filter = ('initiated_by', 'refunded_at')
+    search_fields = ('appointment__patient__email', 'appointment__doctor__email')
 
 
 admin.site.register(CustomUser,        CustomUserAdmin)
