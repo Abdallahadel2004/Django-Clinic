@@ -7,7 +7,7 @@ from django.utils import timezone
 from django.db import transaction
 from django.core.mail import send_mail
 
-from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, UserOTP, DoctorAvailability
+from ..models import Specialty, DoctorProfile, PatientProfile, DoctorSlot, Appointment, UserOTP, DoctorAvailability, PlatformConfig, Payment, Refund
 from .serializers import (
     UserSerializer, UserRegisterSerializer, SpecialtySerializer,
     DoctorProfileSerializer, PatientProfileSerializer, DoctorDetailSerializer,
@@ -16,6 +16,7 @@ from .serializers import (
 from .permissions import IsAdminOrReadOnly
 
 User = get_user_model()
+
 
 class RegisterViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
@@ -188,95 +189,191 @@ class AppointmentViewSet(viewsets.ModelViewSet):
         slot_id = request.data.get('slot_id')
         doctor_id = request.data.get('doctor_id')
         fee = request.data.get('consultation_fee')
-        last4 = request.data.get('payment_card_last4', '')
+        payment_method_id = request.data.get('payment_method_id', 'pm_card_visa')
+
+        if not slot_id or not doctor_id or fee is None:
+            return Response({'error': 'Missing required fields: slot_id, doctor_id, consultation_fee.'}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
+            from decimal import Decimal
+            import stripe
+            
+            appointment = None
+            commission_pct = Decimal('0.00')
+            commission_fee = Decimal('0.00')
+            doctor_payout = Decimal('0.00')
+            total_amount = Decimal(str(fee))
+
+            # Retrieve card details safely from Stripe payment method
+            try:
+                pm = stripe.PaymentMethod.retrieve(payment_method_id)
+                card_last4 = pm.card.last4
+            except Exception:
+                card_last4 = '4242'
+
+            try:
+                intent = stripe.PaymentIntent.create(
+                    amount=int(total_amount * 100),
+                    currency='egp',
+                    payment_method=payment_method_id,
+                    confirm=True,
+                    automatic_payment_methods={
+                        'enabled': True,
+                        'allow_redirects': 'never'
+                    }
+                )
+            except stripe.error.StripeError as e:
+                return Response({'error': f'Stripe payment failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
             with transaction.atomic():
                 slot = DoctorSlot.objects.select_for_update().get(id=slot_id, doctor_id=doctor_id, is_booked=False)
                 doctor = User.objects.get(id=doctor_id)
+                
+                # Fetch platform commission percentage
+                config = PlatformConfig.get_config()
+                commission_pct = config.commission_percentage
+                commission_fee = (total_amount * commission_pct / Decimal('100')).quantize(Decimal('0.01'))
+                doctor_payout = total_amount - commission_fee
+
                 appointment = Appointment.objects.create(
                     patient=request.user,
                     doctor=doctor,
                     slot=slot,
-                    consultation_fee=fee,
+                    consultation_fee=total_amount,
                     status='Pending',
                     payment_status='Paid',
-                    payment_method='Online card',
-                    payment_card_last4=last4,
-                    paid_at=timezone.now()
+                    payment_method='Stripe Card',
+                    payment_card_last4=card_last4,
+                    paid_at=timezone.now(),
+                    platform_commission_percentage=commission_pct,
+                    platform_commission_fee=commission_fee,
+                    doctor_payout=doctor_payout,
                 )
+
+                Payment.objects.create(
+                    appointment=appointment,
+                    total_amount=total_amount,
+                    commission_percentage=commission_pct,
+                    commission_fee=commission_fee,
+                    doctor_payout=doctor_payout,
+                    payment_method='Stripe Card',
+                    card_last4=card_last4,
+                    stripe_payment_intent_id=intent.id,
+                    status='Completed',
+                )
+
                 slot.is_booked = True
                 slot.save()
-                return Response({'message': 'Appointment booked successfully!', 'appointment_id': appointment.id}, status=status.HTTP_201_CREATED)
+
+            # ✅ Send booking confirmation email outside the atomic block
+            self._send_booking_confirmation_email(appointment)
+
+            return Response({
+                'message': 'Appointment booked successfully!',
+                'appointment_id': appointment.id,
+                'financial_summary': {
+                    'total_amount': f'{total_amount:.2f}',
+                    'platform_commission_percentage': f'{commission_pct:.2f}',
+                    'platform_commission_fee': f'{commission_fee:.2f}',
+                    'doctor_payout': f'{doctor_payout:.2f}',
+                    'payment_status': 'Paid',
+                    'payment_method': 'Stripe Card',
+                    'stripe_payment_intent_id': intent.id
+                }
+            }, status=status.HTTP_201_CREATED)
+
         except DoctorSlot.DoesNotExist:
             return Response({'error': 'This appointment slot is unavailable, already booked, or does not belong to this doctor.'}, status=status.HTTP_400_BAD_REQUEST)
         except User.DoesNotExist:
             return Response({'error': 'The specified doctor does not exist in the system.'}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': f'An error occurred during booking: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=True, methods=['post'], url_path='cancel')
     def cancel_appointment(self, request, pk=None):
         appointment = self.get_object()
         cancel_reason = request.data.get('reason', 'No specific reason provided.')
+
         if request.user.role != 'admin' and appointment.doctor != request.user and appointment.patient != request.user:
             return Response({'error': 'You do not have permission to cancel this appointment.'}, status=status.HTTP_403_FORBIDDEN)
         if appointment.status == 'Cancelled':
             return Response({'error': 'This appointment is already cancelled.'}, status=status.HTTP_400_BAD_REQUEST)
 
-        cancelled_by = 'patient' if request.user == appointment.patient else 'doctor'
+        if request.user == appointment.patient:
+            cancelled_by = 'patient'
+        elif request.user == appointment.doctor:
+            cancelled_by = 'doctor'
+        else:
+            cancelled_by = 'admin'
+
         try:
+            from decimal import Decimal
+            refund_amount = Decimal('0.00')
+
             with transaction.atomic():
                 appointment.status = 'Cancelled'
+                appointment.cancellation_reason = cancel_reason
+                appointment.cancelled_by = cancelled_by
+                appointment.cancelled_at = timezone.now()
+
                 if appointment.payment_status == 'Paid':
                     appointment.payment_status = 'Refunded'
+
+                    # Fetch and lock the related Payment record
+                    payment = Payment.objects.select_for_update().get(appointment=appointment)
+                    payment.status = 'Refunded'
+                    
+                    stripe_refund_id = None
+                    if payment.stripe_payment_intent_id:
+                        import stripe
+                        try:
+                            stripe_refund = stripe.Refund.create(
+                                payment_intent=payment.stripe_payment_intent_id
+                            )
+                            stripe_refund_id = stripe_refund.id
+                        except stripe.error.StripeError as e:
+                            raise ValueError(f"Stripe refund failed: {str(e)}")
+
+                    payment.save()
+
+                    # Create Refund record (full refund policy)
+                    Refund.objects.create(
+                        appointment=appointment,
+                        payment=payment,
+                        refund_amount=payment.total_amount,
+                        commission_retained=Decimal('0.00'),
+                        reason=cancel_reason,
+                        initiated_by=cancelled_by,
+                        stripe_refund_id=stripe_refund_id,
+                    )
+                    refund_amount = payment.total_amount
+
                 appointment.save()
+
                 if appointment.slot:
-                    slot = appointment.slot
+                    slot = DoctorSlot.objects.select_for_update().get(id=appointment.slot_id)
                     slot.is_booked = False
                     slot.save()
+
+            # ✅ Send notification emails outside the atomic block
             self._send_cancellation_email(appointment, cancel_reason)
             if cancelled_by == 'patient':
                 self._send_doctor_cancellation_email(appointment, cancel_reason)
-            return Response({'message': 'Appointment cancelled successfully. Slot freed, patient notified, and refund processed.', 'appointment_status': appointment.status, 'payment_status': appointment.payment_status}, status=status.HTTP_200_OK)
+
+            return Response({
+                'message': 'Appointment cancelled successfully. Slot freed, patient notified, and refund processed.',
+                'appointment_status': 'Cancelled',
+                'payment_status': appointment.payment_status,
+                'refund_details': {
+                    'refund_amount': f'{refund_amount:.2f}',
+                    'commission_retained': '0.00',
+                    'refund_policy': 'full_refund',
+                    'initiated_by': cancelled_by
+                }
+            }, status=status.HTTP_200_OK)
+
         except Exception as e:
             return Response({'error': f'An error occurred during cancellation: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
-    def _send_cancellation_email(self, appointment, reason):
-        try:
-            patient_email = appointment.patient.email
-            doctor_name = appointment.doctor.get_full_name() or appointment.doctor.username
-            slot_time = appointment.slot.time if appointment.slot else 'N/A'
-            slot_date = appointment.slot.date if appointment.slot else 'N/A'
-            subject = 'CarePulse - Your Appointment Has Been Cancelled'
-            message = (
-                f'Hello {appointment.patient.first_name or appointment.patient.username},\n\n'
-                f'We regret to inform you that your appointment with Dr. {doctor_name} '
-                f'scheduled on {slot_date} at {slot_time} has been cancelled.\n\n'
-                f'Reason: "{reason}"\n\n'
-                f'A full refund of {appointment.consultation_fee} EGP has been issued back to your account.\n\n'
-                'Wishing you the best of health,\nCarePulse Team'
-            )
-            send_mail(subject=subject, message=message, from_email='no-reply@carepulse.com', recipient_list=[patient_email], fail_silently=False)
-        except Exception as e:
-            print(f'Failed to send patient cancellation email: {e}')
-
-    def _send_doctor_cancellation_email(self, appointment, reason):
-        try:
-            doctor_email = appointment.doctor.email
-            patient_name = appointment.patient.get_full_name() or appointment.patient.username
-            slot_time = appointment.slot.time if appointment.slot else 'N/A'
-            slot_date = appointment.slot.date if appointment.slot else 'N/A'
-            subject = 'CarePulse - Appointment Cancelled by Patient'
-            message = (
-                f'Dear Dr. {appointment.doctor.get_full_name() or appointment.doctor.username},\n\n'
-                f'We would like to inform you that {patient_name} has cancelled their appointment '
-                f'scheduled on {slot_date} at {slot_time}.\n\n'
-                f'Cancellation reason: "{reason}"\n\n'
-                'The slot has been freed and is now available for new bookings.\n\n'
-                'Best regards,\nCarePulse Team'
-            )
-            send_mail(subject=subject, message=message, from_email='no-reply@carepulse.com', recipient_list=[doctor_email], fail_silently=False)
-        except Exception as e:
-            print(f'Failed to send doctor cancellation email: {e}')
 
     @action(detail=True, methods=['post'], url_path='complete')
     def complete_appointment(self, request, pk=None):
@@ -291,29 +388,159 @@ class AppointmentViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='approve')
     def approve_appointment(self, request, pk=None):
         appointment = self.get_object()
+
         if request.user.role != 'admin' and appointment.doctor != request.user:
             return Response({'error': 'You do not have permission to approve this appointment.'}, status=status.HTTP_403_FORBIDDEN)
         if appointment.status == 'Confirmed':
             return Response({'error': 'This appointment is already confirmed.'}, status=status.HTTP_400_BAD_REQUEST)
+
         appointment.status = 'Confirmed'
         appointment.doctor_notes = request.data.get('doctor_notes', appointment.doctor_notes)
         appointment.save()
-        return Response({'message': 'Appointment approved successfully.', 'appointment_status': appointment.status}, status=status.HTTP_200_OK)
+
+        # ✅ NEW: notify patient that doctor confirmed
+        self._send_approval_email(appointment)
+
+        return Response({
+            'message': 'Appointment approved successfully.',
+            'appointment_status': appointment.status
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='reject')
     def reject_appointment(self, request, pk=None):
         appointment = self.get_object()
+
         if request.user.role != 'admin' and appointment.doctor != request.user:
             return Response({'error': 'You do not have permission to reject this appointment.'}, status=status.HTTP_403_FORBIDDEN)
         if appointment.status in ['Rejected', 'Cancelled']:
             return Response({'error': 'This appointment is already closed.'}, status=status.HTTP_400_BAD_REQUEST)
+
         appointment.status = 'Rejected'
         appointment.doctor_notes = request.data.get('doctor_notes', appointment.doctor_notes)
         if appointment.slot:
             appointment.slot.is_booked = False
             appointment.slot.save()
         appointment.save()
-        return Response({'message': 'Appointment rejected successfully.', 'appointment_status': appointment.status}, status=status.HTTP_200_OK)
+
+        return Response({
+            'message': 'Appointment rejected successfully.',
+            'appointment_status': appointment.status
+        }, status=status.HTTP_200_OK)
+
+    # ─── Email helpers ────────────────────────────────────────────────────────
+
+    def _send_booking_confirmation_email(self, appointment):
+        """Sent to patient immediately after a successful booking."""
+        try:
+            doctor_name = appointment.doctor.get_full_name() or appointment.doctor.username
+            slot_time = appointment.slot.time if appointment.slot else 'N/A'
+            slot_date = appointment.slot.date if appointment.slot else 'N/A'
+            fee = appointment.consultation_fee
+            patient_name = appointment.patient.first_name or appointment.patient.username
+
+            subject = 'CarePulse - Appointment Booking Confirmation'
+            message = (
+                f'Hello {patient_name},\n\n'
+                f'Your appointment with Dr. {doctor_name} has been successfully booked.\n\n'
+                f'Details:\n'
+                f'  Date      : {slot_date}\n'
+                f'  Time      : {slot_time}\n'
+                f'  Fee       : {fee} EGP\n'
+                f'  Status    : Pending (awaiting doctor confirmation)\n\n'
+                'You will receive another email once the doctor confirms your appointment.\n\n'
+                'Wishing you good health,\nCarePulse Team'
+            )
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email='no-reply@carepulse.com',
+                recipient_list=[appointment.patient.email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            print(f'Failed to send booking confirmation email: {e}')
+
+    def _send_approval_email(self, appointment):
+        """Sent to patient when the doctor confirms (approves) the appointment."""
+        try:
+            doctor_name = appointment.doctor.get_full_name() or appointment.doctor.username
+            slot_time = appointment.slot.time if appointment.slot else 'N/A'
+            slot_date = appointment.slot.date if appointment.slot else 'N/A'
+            patient_name = appointment.patient.first_name or appointment.patient.username
+
+            subject = 'CarePulse - Your Appointment is Confirmed'
+            message = (
+                f'Hello {patient_name},\n\n'
+                f'Great news! Dr. {doctor_name} has confirmed your appointment.\n\n'
+                f'Details:\n'
+                f'  Date : {slot_date}\n'
+                f'  Time : {slot_time}\n\n'
+                'Please try to arrive 10 minutes early.\n\n'
+                'CarePulse Team'
+            )
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email='no-reply@carepulse.com',
+                recipient_list=[appointment.patient.email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            print(f'Failed to send approval email: {e}')
+
+    def _send_cancellation_email(self, appointment, reason):
+        """Sent to patient when their appointment is cancelled."""
+        try:
+            doctor_name = appointment.doctor.get_full_name() or appointment.doctor.username
+            slot_time = appointment.slot.time if appointment.slot else 'N/A'
+            slot_date = appointment.slot.date if appointment.slot else 'N/A'
+            patient_name = appointment.patient.first_name or appointment.patient.username
+
+            subject = 'CarePulse - Your Appointment Has Been Cancelled'
+            message = (
+                f'Hello {patient_name},\n\n'
+                f'We regret to inform you that your appointment with Dr. {doctor_name} '
+                f'scheduled on {slot_date} at {slot_time} has been cancelled.\n\n'
+                f'Reason: "{reason}"\n\n'
+                f'A full refund of {appointment.consultation_fee} EGP has been issued back to your account.\n\n'
+                'Wishing you the best of health,\nCarePulse Team'
+            )
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email='no-reply@carepulse.com',
+                recipient_list=[appointment.patient.email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            print(f'Failed to send patient cancellation email: {e}')
+
+    def _send_doctor_cancellation_email(self, appointment, reason):
+        """Sent to doctor when a patient cancels."""
+        try:
+            patient_name = appointment.patient.get_full_name() or appointment.patient.username
+            slot_time = appointment.slot.time if appointment.slot else 'N/A'
+            slot_date = appointment.slot.date if appointment.slot else 'N/A'
+            doctor_name = appointment.doctor.get_full_name() or appointment.doctor.username
+
+            subject = 'CarePulse - Appointment Cancelled by Patient'
+            message = (
+                f'Dear Dr. {doctor_name},\n\n'
+                f'We would like to inform you that {patient_name} has cancelled their appointment '
+                f'scheduled on {slot_date} at {slot_time}.\n\n'
+                f'Cancellation reason: "{reason}"\n\n'
+                'The slot has been freed and is now available for new bookings.\n\n'
+                'Best regards,\nCarePulse Team'
+            )
+            send_mail(
+                subject=subject,
+                message=message,
+                from_email='no-reply@carepulse.com',
+                recipient_list=[appointment.doctor.email],
+                fail_silently=False,
+            )
+        except Exception as e:
+            print(f'Failed to send doctor cancellation email: {e}')
 
 
 class SpecialtyViewSet(viewsets.ModelViewSet):
@@ -360,14 +587,20 @@ class UserViewSet(viewsets.ModelViewSet):
             profile, _ = DoctorProfile.objects.get_or_create(user=user)
             profile.is_approved = True
             profile.save()
-        return Response({'message': 'User approved successfully.', 'is_active': user.is_active}, status=status.HTTP_200_OK)
+        return Response({
+            'message': 'User approved successfully.',
+            'is_active': user.is_active
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='block', permission_classes=[permissions.IsAdminUser])
     def block(self, request, pk=None):
         user = self.get_object()
         user.is_active = False
         user.save()
-        return Response({'message': 'User blocked successfully.', 'is_active': user.is_active}, status=status.HTTP_200_OK)
+        return Response({
+            'message': 'User blocked successfully.',
+            'is_active': user.is_active
+        }, status=status.HTTP_200_OK)
 
 
 class DoctorProfileViewSet(viewsets.ModelViewSet):
@@ -403,7 +636,11 @@ class DoctorProfileViewSet(viewsets.ModelViewSet):
         profile.save()
         profile.user.is_active = True
         profile.user.save()
-        return Response({'message': 'Doctor profile approved successfully.', 'doctor_id': profile.user.id, 'is_approved': profile.is_approved}, status=status.HTTP_200_OK)
+        return Response({
+            'message': 'Doctor profile approved successfully.',
+            'doctor_id': profile.user.id,
+            'is_approved': profile.is_approved
+        }, status=status.HTTP_200_OK)
 
 
 class PatientProfileViewSet(viewsets.ModelViewSet):
@@ -423,3 +660,6 @@ class PatientProfileViewSet(viewsets.ModelViewSet):
         serializer.is_valid(raise_exception=True)
         serializer.save()
         return Response(serializer.data)
+    
+
+
