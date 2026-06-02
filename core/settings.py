@@ -24,16 +24,15 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-ropwv=1cs_7vfx8*@winsr$73_6u%=brm0-cs62s94w@0nk5wb'
+SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-ropwv=1cs_7vfx8*@winsr$73_6u%=brm0-cs62s94w@0nk5wb')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DEBUG', 'False') == 'True'
 
 ALLOWED_HOSTS = [
     'localhost',
     '127.0.0.1',
-    'django-clinic-3y774ocgh-ehdaa-leo-s-projects.vercel.app',
-    '.vercel.app',
+    'yourusername.pythonanywhere.com',
 ]
 
 if os.getenv('ALLOWED_HOSTS'):
@@ -49,6 +48,7 @@ if os.getenv('VERCEL_URL'):
 CSRF_TRUSTED_ORIGINS = [
     'https://django-clinic-3y774ocgh-ehdaa-leo-s-projects.vercel.app',
     'https://*.vercel.app',
+    'https://yourusername.pythonanywhere.com',
 ]
 
 if os.getenv('CSRF_TRUSTED_ORIGINS'):
@@ -152,9 +152,13 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
-STATIC_URL = 'static/'
+STATIC_URL = '/static/'
+STATIC_ROOT = BASE_DIR / 'staticfiles'
 
-CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "https://your-react-app.vercel.app",
+]
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework_simplejwt.authentication.JWTAuthentication',
