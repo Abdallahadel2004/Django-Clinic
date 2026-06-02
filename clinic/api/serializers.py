@@ -10,7 +10,6 @@ User = get_user_model()
 class UserSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
     role_display = serializers.CharField(source='get_role_display', read_only=True)
-    # BUG FIX #5: إضافة status field — كان ناقص وبيخلي UsersPanel يعرض غلط
     status = serializers.SerializerMethodField()
     name = serializers.SerializerMethodField()
 
@@ -27,18 +26,9 @@ class UserSerializer(serializers.ModelSerializer):
         return obj.get_full_name() or obj.username
 
     def get_name(self, obj):
-        # UsersPanel بتقرأ name مش full_name
         return obj.get_full_name() or obj.username
 
     def get_status(self, obj):
-        """
-        BUG FIX #5:
-        بنحول is_active + doctor profile is_approved لـ status واحد مفهوم للـ frontend:
-        - is_active=False  → 'blocked'
-        - doctor + is_approved=True → 'approved'
-        - patient + is_active=True → 'approved'  (patients مش محتاجين manual approval)
-        - غير كده → 'pending'
-        """
         if not obj.is_active:
             return 'blocked'
         if obj.role == 'doctor':
@@ -52,7 +42,6 @@ class UserSerializer(serializers.ModelSerializer):
             if profile and profile.is_approved:
                 return 'approved'
             return 'pending'
-        # patients وغيرهم: لو is_active يبقى approved
         return 'approved'
 
 
@@ -137,12 +126,10 @@ class PatientProfileSerializer(serializers.ModelSerializer):
 class DoctorDetailSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
     role_display = serializers.CharField(source='get_role_display', read_only=True)
-
-    # BUG FIX #1: إضافة status field — كان ناقص وبيخلي badge الـ DoctorsPanel غلط دايماً
     status = serializers.SerializerMethodField()
 
-    # Flattened profile fields
     specialty_name = serializers.SerializerMethodField()
+    specialty_id = serializers.SerializerMethodField()
     bio = serializers.SerializerMethodField()
     consultation_fee = serializers.SerializerMethodField()
     clinic_address = serializers.SerializerMethodField()
@@ -155,7 +142,8 @@ class DoctorDetailSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'first_name', 'last_name',
             'full_name', 'phone', 'role', 'role_display', 'is_active',
             'status', 'is_approved',
-            'specialty_name', 'bio', 'consultation_fee', 'clinic_address', 'clinic_phone'
+            'specialty_name', 'specialty_id', 'bio', 'consultation_fee',
+            'clinic_address', 'clinic_phone',
         ]
 
     def get_full_name(self, obj):
@@ -173,11 +161,6 @@ class DoctorDetailSerializer(serializers.ModelSerializer):
         return prof.is_approved if prof else False
 
     def get_status(self, obj):
-        """
-        BUG FIX #1:
-        DoctorsPanel بتقرأ doctor.status عشان تحدد approved/pending badge.
-        كان ناقص تماماً فكان بيرجع undefined وبيعرض Pending للكل.
-        """
         if not obj.is_active:
             return 'blocked'
         prof = self._get_safe_profile(obj)
@@ -188,6 +171,13 @@ class DoctorDetailSerializer(serializers.ModelSerializer):
     def get_specialty_name(self, obj):
         prof = self._get_safe_profile(obj)
         return prof.specialty.name if prof and prof.specialty else 'General Practitioner'
+
+    def get_specialty_id(self, obj):
+        
+        prof = self._get_safe_profile(obj)
+        if prof and prof.specialty:
+            return prof.specialty.id
+        return None
 
     def get_bio(self, obj):
         prof = self._get_safe_profile(obj)
