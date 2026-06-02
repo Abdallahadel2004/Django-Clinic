@@ -103,11 +103,18 @@ class VerifyOTPView(APIView):
 
 
 class DoctorListViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = User.objects.filter(role='doctor', doctor_profile__is_approved=True)
     serializer_class = DoctorDetailSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-
+    def get_queryset(self):
+        user = self.request.user
+        
+        if user.is_staff or user.role == 'admin':
+            return User.objects.filter(role='doctor')
+        try:
+            return User.objects.filter(role='doctor', doctor_profile__is_approved=True)
+        except Exception:
+            return User.objects.filter(role='doctor', doctorprofile__is_approved=True)
 class DoctorSlotViewSet(viewsets.ModelViewSet):
     queryset = DoctorSlot.objects.all()
     serializer_class = DoctorSlotSerializer
@@ -566,10 +573,23 @@ class UserViewSet(viewsets.ModelViewSet):
         return UserSerializer
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve', 'update', 'partial_update', 'destroy', 'approve', 'block']:
+        if self.action in ['update', 'partial_update']:
+            return [permissions.IsAuthenticated()]
+        if self.action in ['list', 'retrieve', 'destroy', 'approve', 'block']:
             return [permissions.IsAdminUser()]
         return [permissions.IsAuthenticated()]
 
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        if request.user != instance and not request.user.is_staff:
+            return Response({'error': 'You do not have permission to edit this profile.'}, status=status.HTTP_403_FORBIDDEN)
+            
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
+    
     def get_queryset(self):
         user = self.request.user
         queryset = User.objects.all()
@@ -589,16 +609,22 @@ class UserViewSet(viewsets.ModelViewSet):
     def approve(self, request, pk=None):
         user = self.get_object()
         user.is_active = True
-        user.save()
+        
+        is_doctor_approved = False
         if user.role == 'doctor':
             profile, _ = DoctorProfile.objects.get_or_create(user=user)
             profile.is_approved = True
             profile.save()
+            is_doctor_approved = True
+            
+        user.save()
+        
         return Response({
             'message': 'User approved successfully.',
-            'is_active': user.is_active
+            'is_active': user.is_active,
+            'is_approved': is_doctor_approved 
         }, status=status.HTTP_200_OK)
-
+    
     @action(detail=True, methods=['post'], url_path='block', permission_classes=[permissions.IsAdminUser])
     def block(self, request, pk=None):
         user = self.get_object()

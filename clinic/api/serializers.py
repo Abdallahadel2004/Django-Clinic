@@ -10,17 +10,50 @@ User = get_user_model()
 class UserSerializer(serializers.ModelSerializer):
     full_name = serializers.SerializerMethodField()
     role_display = serializers.CharField(source='get_role_display', read_only=True)
+    # BUG FIX #5: إضافة status field — كان ناقص وبيخلي UsersPanel يعرض غلط
+    status = serializers.SerializerMethodField()
+    name = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
-            'full_name', 'phone', 'role', 'role_display', 'is_active', 'is_staff'
+            'full_name', 'name', 'phone', 'role', 'role_display',
+            'is_active', 'is_staff', 'status'
         ]
-        read_only_fields = ['id', 'full_name', 'role_display']
+        read_only_fields = ['id', 'full_name', 'role_display', 'status', 'name']
 
     def get_full_name(self, obj):
         return obj.get_full_name() or obj.username
+
+    def get_name(self, obj):
+        # UsersPanel بتقرأ name مش full_name
+        return obj.get_full_name() or obj.username
+
+    def get_status(self, obj):
+        """
+        BUG FIX #5:
+        بنحول is_active + doctor profile is_approved لـ status واحد مفهوم للـ frontend:
+        - is_active=False  → 'blocked'
+        - doctor + is_approved=True → 'approved'
+        - patient + is_active=True → 'approved'  (patients مش محتاجين manual approval)
+        - غير كده → 'pending'
+        """
+        if not obj.is_active:
+            return 'blocked'
+        if obj.role == 'doctor':
+            try:
+                profile = obj.doctor_profile
+            except Exception:
+                try:
+                    profile = obj.doctorprofile
+                except Exception:
+                    return 'pending'
+            if profile and profile.is_approved:
+                return 'approved'
+            return 'pending'
+        # patients وغيرهم: لو is_active يبقى approved
+        return 'approved'
 
 
 class SpecialtySerializer(serializers.ModelSerializer):
@@ -30,7 +63,6 @@ class SpecialtySerializer(serializers.ModelSerializer):
 
 
 class UserRegisterSerializer(serializers.ModelSerializer):
-    # ✅ username is now optional (auto-generated from email)
     username = serializers.CharField(required=False, allow_blank=True)
     email = serializers.EmailField(required=True)
     password = serializers.CharField(write_only=True, style={'input_type': 'password'})
@@ -40,23 +72,18 @@ class UserRegisterSerializer(serializers.ModelSerializer):
         fields = ['id', 'username', 'email', 'password', 'role', 'phone', 'first_name', 'last_name']
 
     def validate_email(self, value):
-        # ✅ Check uniqueness only for NEW registrations (exclude inactive re-registrations — handled in viewset)
         if User.objects.filter(email=value, is_active=True).exists():
             raise serializers.ValidationError('A verified account with this email already exists.')
         return value
 
     def create(self, validated_data):
-        # ✅ Auto-generate username from email if not provided
         email = validated_data['email']
         username = validated_data.get('username') or email.split('@')[0]
-
-        # Ensure username uniqueness
         base = username
         counter = 1
         while User.objects.filter(username=username).exists():
             username = f'{base}{counter}'
             counter += 1
-
         user = User.objects.create_user(
             email=email,
             username=username,
@@ -108,20 +135,75 @@ class PatientProfileSerializer(serializers.ModelSerializer):
 
 
 class DoctorDetailSerializer(serializers.ModelSerializer):
-    # ✅ renamed from 'profile' to 'doctor_profile' to match frontend usage
-    doctor_profile = DoctorProfileSerializer(read_only=True)
     full_name = serializers.SerializerMethodField()
     role_display = serializers.CharField(source='get_role_display', read_only=True)
+
+    # BUG FIX #1: إضافة status field — كان ناقص وبيخلي badge الـ DoctorsPanel غلط دايماً
+    status = serializers.SerializerMethodField()
+
+    # Flattened profile fields
+    specialty_name = serializers.SerializerMethodField()
+    bio = serializers.SerializerMethodField()
+    consultation_fee = serializers.SerializerMethodField()
+    clinic_address = serializers.SerializerMethodField()
+    clinic_phone = serializers.SerializerMethodField()
+    is_approved = serializers.SerializerMethodField()
 
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'first_name', 'last_name',
-            'full_name', 'phone', 'role', 'role_display', 'is_active', 'doctor_profile'
+            'full_name', 'phone', 'role', 'role_display', 'is_active',
+            'status', 'is_approved',
+            'specialty_name', 'bio', 'consultation_fee', 'clinic_address', 'clinic_phone'
         ]
 
     def get_full_name(self, obj):
         return obj.get_full_name() or obj.username
+
+    def _get_safe_profile(self, obj):
+        if hasattr(obj, 'doctor_profile'):
+            return obj.doctor_profile
+        if hasattr(obj, 'doctorprofile'):
+            return obj.doctorprofile
+        return None
+
+    def get_is_approved(self, obj):
+        prof = self._get_safe_profile(obj)
+        return prof.is_approved if prof else False
+
+    def get_status(self, obj):
+        """
+        BUG FIX #1:
+        DoctorsPanel بتقرأ doctor.status عشان تحدد approved/pending badge.
+        كان ناقص تماماً فكان بيرجع undefined وبيعرض Pending للكل.
+        """
+        if not obj.is_active:
+            return 'blocked'
+        prof = self._get_safe_profile(obj)
+        if prof and prof.is_approved:
+            return 'approved'
+        return 'pending'
+
+    def get_specialty_name(self, obj):
+        prof = self._get_safe_profile(obj)
+        return prof.specialty.name if prof and prof.specialty else 'General Practitioner'
+
+    def get_bio(self, obj):
+        prof = self._get_safe_profile(obj)
+        return prof.bio if prof else ''
+
+    def get_consultation_fee(self, obj):
+        prof = self._get_safe_profile(obj)
+        return str(prof.consultation_fee) if prof else '0.00'
+
+    def get_clinic_address(self, obj):
+        prof = self._get_safe_profile(obj)
+        return prof.clinic_address if prof else ''
+
+    def get_clinic_phone(self, obj):
+        prof = self._get_safe_profile(obj)
+        return prof.clinic_phone if prof else ''
 
 
 class DoctorSlotSerializer(serializers.ModelSerializer):
@@ -176,7 +258,7 @@ class PaymentSerializer(serializers.ModelSerializer):
             'commission_fee', 'doctor_payout', 'payment_method',
             'card_last4', 'status', 'paid_at', 'updated_at'
         ]
-        read_only_fields = fields  # Payments are system-created, never user-edited
+        read_only_fields = fields
 
 
 class RefundSerializer(serializers.ModelSerializer):
@@ -193,8 +275,8 @@ class AppointmentSerializer(serializers.ModelSerializer):
     patient_name = serializers.ReadOnlyField(source='patient.get_full_name')
     doctor_name = serializers.ReadOnlyField(source='doctor.get_full_name')
     slot_details = DoctorSlotSerializer(source='slot', read_only=True)
-    payment_record = PaymentSerializer(read_only=True)    # NEW
-    refund_record = RefundSerializer(read_only=True)      # NEW
+    payment_record = PaymentSerializer(read_only=True)
+    refund_record = RefundSerializer(read_only=True)
 
     class Meta:
         model = Appointment
@@ -204,10 +286,8 @@ class AppointmentSerializer(serializers.ModelSerializer):
             'status', 'consultation_fee', 'payment_status', 'payment_method',
             'payment_card_last4', 'paid_at', 'created_at',
             'diagnosis', 'prescription', 'doctor_notes',
-            # NEW financial fields
             'platform_commission_percentage', 'platform_commission_fee',
             'doctor_payout', 'cancellation_reason', 'cancelled_by', 'cancelled_at',
-            # NEW nested records
             'payment_record', 'refund_record'
         ]
         read_only_fields = [
@@ -226,9 +306,8 @@ class ReviewSerializer(serializers.ModelSerializer):
         read_only_fields = ['patient', 'doctor', 'created_at']
 
 
-# ✅ Fixed: uses email field for login
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
-    username_field = 'email'  # ← tell SimpleJWT to use email
+    username_field = 'email'
 
     @classmethod
     def get_token(cls, user):
