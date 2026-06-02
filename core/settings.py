@@ -12,6 +12,9 @@ https://docs.djangoproject.com/en/6.0/ref/settings/
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -26,7 +29,37 @@ SECRET_KEY = 'django-insecure-ropwv=1cs_7vfx8*@winsr$73_6u%=brm0-cs62s94w@0nk5wb
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = [
+    'localhost',
+    '127.0.0.1',
+    'django-clinic-3y774ocgh-ehdaa-leo-s-projects.vercel.app',
+    '.vercel.app',
+]
+
+if os.getenv('ALLOWED_HOSTS'):
+    ALLOWED_HOSTS.extend(
+        host.strip()
+        for host in os.getenv('ALLOWED_HOSTS', '').split(',')
+        if host.strip()
+    )
+
+if os.getenv('VERCEL_URL'):
+    ALLOWED_HOSTS.append(os.getenv('VERCEL_URL'))
+
+CSRF_TRUSTED_ORIGINS = [
+    'https://django-clinic-3y774ocgh-ehdaa-leo-s-projects.vercel.app',
+    'https://*.vercel.app',
+]
+
+if os.getenv('CSRF_TRUSTED_ORIGINS'):
+    CSRF_TRUSTED_ORIGINS.extend(
+        origin.strip()
+        for origin in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',')
+        if origin.strip()
+    )
+
+if os.getenv('VERCEL_URL'):
+    CSRF_TRUSTED_ORIGINS.append(f"https://{os.getenv('VERCEL_URL')}")
 
 
 # Application definition
@@ -127,9 +160,6 @@ REST_FRAMEWORK = {
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     )
 }
-from dotenv import load_dotenv
-load_dotenv()
-
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
 EMAIL_HOST = 'smtp.gmail.com'
 EMAIL_PORT = 587
