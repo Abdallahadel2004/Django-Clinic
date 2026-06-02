@@ -239,7 +239,7 @@ class AppointmentViewSet(viewsets.ModelViewSet):
                 # Fetch platform commission percentage
                 config = PlatformConfig.get_config()
                 commission_pct = config.commission_percentage
-                commission_fee = (total_amount * commission_pct / Decimal('100')).quantize(Decimal('0.01'))
+                commission_fee = (total_amount * Decimal(str(commission_pct)) / Decimal('100')).quantize(Decimal('0.01'))
                 doctor_payout = total_amount - commission_fee
 
                 appointment = Appointment.objects.create(
