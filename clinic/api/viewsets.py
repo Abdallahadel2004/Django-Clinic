@@ -113,6 +113,14 @@ class DoctorSlotViewSet(viewsets.ModelViewSet):
     serializer_class = DoctorSlotSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def get_queryset(self):
+        user = self.request.user
+        if user.role == 'doctor':
+            return DoctorSlot.objects.filter(doctor=user)
+        if user.role == 'admin' or user.is_staff:
+            return DoctorSlot.objects.all()
+        return DoctorSlot.objects.none()
+
     def perform_create(self, serializer):
         serializer.save(doctor=self.request.user)
 
@@ -125,7 +133,6 @@ class DoctorSlotViewSet(viewsets.ModelViewSet):
             slots = slots.filter(doctor_id=doctor_id)
         serializer = self.get_serializer(slots, many=True)
         return Response(serializer.data)
-
 
 class DoctorAvailabilityViewSet(viewsets.ModelViewSet):
     queryset = DoctorAvailability.objects.all()
